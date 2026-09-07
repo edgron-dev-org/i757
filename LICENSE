@@ -1,0 +1,67 @@
+Edgron Source-Available License, version 1.0 (2026-09-07)
+Copyright (c) 2026 Edgron. All rights reserved.
+
+This license governs the Edgron-authored portions of this repository (the
+"Software"): the board-level firmware and the documents that describe it.
+Two sub-directories are NOT under this license but under the Apache License,
+Version 2.0 — see modbus/LICENSE and uartdrv/LICENSE. Third-party components
+are licensed under their own terms, listed in THIRD_PARTY_NOTICES.md; those
+terms prevail for those components.
+
+The intent in one sentence: read it, study it, change it, run it on your own
+bench, and build commercial products with it on genuine Edgron hardware — but
+do not build or sell competing hardware with it.
+
+1. DEFINITIONS.
+   "Edgron Hardware" means a controller, module or board manufactured by or
+   under license from Edgron and sold under the Edgron or i757 name.
+   "Personal Use" means use by an individual, or inside a research,
+   educational or evaluation setting, where neither the Software nor a device
+   running it is sold, rented, licensed or otherwise supplied to a third party
+   for payment or other commercial advantage.
+   "Commercial Use" means any use that is not Personal Use.
+
+2. GRANT. Subject to this license, Edgron grants you a worldwide,
+   non-exclusive, royalty-free license to:
+   a) read, reproduce, study and modify the Software in source form;
+   b) redistribute the Software, modified or not, in source or object form,
+      provided this license file and all copyright, license and attribution
+      notices are kept intact and this license applies to the recipient;
+   c) run the Software, modified or not, on any hardware for Personal Use;
+   d) run and distribute the Software, modified or not, for Commercial Use
+      SOLELY on or for Edgron Hardware. Your own application code linked with
+      the Software is yours and is not restricted by this license.
+
+3. RESTRICTIONS. You may not:
+   a) make Commercial Use of the Software, in source or object form, on or
+      for hardware that is not Edgron Hardware — in particular, you may not
+      manufacture, sell or supply hardware that runs the Software or a
+      derivative of it unless that hardware is Edgron Hardware;
+   b) remove, obscure or alter copyright, license or attribution notices,
+      or misrepresent the origin of the Software;
+   c) use the "Edgron" or "i757" names or logos, except to truthfully state
+      that your product incorporates Edgron Hardware or was built with this
+      Software.
+
+4. YOUR CODE. Application code you write against the Software's interfaces
+   (app_user.c and files you add) is yours. This license imposes no
+   obligation to disclose it and does not extend to it.
+
+5. HARDWARE DESIGN FILES. If schematics or other hardware design files are
+   published by Edgron alongside the Software, they may be reproduced and
+   studied for Personal Use only; Commercial Use of them, including making
+   hardware from them for sale, is not permitted.
+
+6. NO WARRANTY. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
+   EDGRON BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM
+   THE SOFTWARE OR ITS USE. You are responsible for validating the Software
+   for use in your product, including any safety-relevant function.
+
+7. TERMINATION. This license terminates automatically on material breach.
+   Sections 3(c), 6 and 7 survive termination. Rights of recipients who
+   received the Software from you in compliance with this license are not
+   affected by your breach.
+
+SPDX-License-Identifier: LicenseRef-Edgron-Source-Available

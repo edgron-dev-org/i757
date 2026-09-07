@@ -1,0 +1,24 @@
+# Build intermediates (whole build tree: .o/.obj/CMake cache/OTA .pushed_ archives)
+build/
+**/build/
+*.map
+*.list
+*.pushed_*.elf
+
+# Secrets — NEVER commit
+keys/
+*.key
+*.pem
+*.pfx
+**/app_certs.c     # build-time generated from keys/, contains private key
+
+# IDE / editor
+.vscode/ipch/
+.cache/
+.settings/
+.metadata/
+*.bak
+
+# Python
+__pycache__/
+*.pyc
