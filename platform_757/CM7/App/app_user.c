@@ -26,6 +26,7 @@
 #include "app_vent.h"          /* greenhouse roof-vent temperature control */
 #include "app_flowmon.h"       /* per-gutter feed-flow monitor / blocked-line alarm */
 #include "app_dose.h"          /* nutrient/pH dosing pumps (relay coils 0..2) */
+#include "app_aer.h"           /* reservoir aeration: air pump on relay coil 8, by water temperature */
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -568,6 +569,12 @@ void app_user_init(void)
    * 1.2 L/min for 2 min is probably blocked -> FAULT event + live cloud alarm (phone push
    * via the dashboard) + optional buzzer chirp. "flow" on CLI/cloud to tune / silence. */
   app_flowmon_init();
+
+  /* reservoir aeration (app_aer.c): air pump on relay coil 8 (O9), on above a settable
+   * water temperature (default 22.0 C, 1.0 C hysteresis), water temps from PT_PHEC. Boots
+   * in auto, so a reset re-derives the pump state instead of leaving it silently off.
+   * "aer" on CLI/cloud to set the temperature or override. */
+  app_aer_init();
 
   /* For one-off / aperiodic access (setup, diagnostics, OTA) the blocking app_mb_read/write_*
    * helpers in app_platform.h are still the right tool — the process image is for cyclic I/O. */

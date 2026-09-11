@@ -539,7 +539,7 @@ static void dl_build_header(char *out, uint16_t cap)
   /* g1..g4 (2026-09-03): per-gutter feed flow, 0.1 L/min, window-end value of the 30 s
    * lazy rate (app_user.c, 1200 p/L hall meters on HSDI4/2/6/7) — a clogged line shows
    * as a gutter dropping out while the others hold. */
-  uint16_t n = (uint16_t)snprintf(out, cap, "ts,temp_avg,temp_min,temp_max,vent,flow,g1,g2,g3,g4");
+  uint16_t n = (uint16_t)snprintf(out, cap, "ts,temp_avg,temp_min,temp_max,vent,aer,flow,g1,g2,g3,g4");
   uint8_t i, k;
   for (i = 0; i < s_nslot; i++)
   {
@@ -662,6 +662,8 @@ static void dl_flush_row(uint32_t win_end_ts)
   n += row_agg(&s_line[n], (uint16_t)(sizeof s_line - n), &s_temp);
   { extern uint8_t app_vent_stage(void);   /* true window stage (relay read-back, app_vent.c) */
     n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%u", (unsigned)app_vent_stage()); }
+  { extern uint8_t app_aer_state(void);    /* air pump, relay read-back (app_aer.c), 2026-09-08 */
+    n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%u", (unsigned)app_aer_state()); }
   { extern uint32_t app_flow_dl(void);     /* water meter total, 0.1 L (app_user.c, HSDI0) */
     n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%lu", (unsigned long)app_flow_dl()); }
   { extern uint16_t app_gutter_rate_dlmin(uint8_t);   /* per-gutter feed flow, 0.1 L/min (app_user.c) */

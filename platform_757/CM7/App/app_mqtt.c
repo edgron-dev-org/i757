@@ -242,7 +242,8 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
           (strncmp(s_cmd_buf, "logstat", 7) == 0) || (strncmp(s_cmd_buf, "logget ", 7) == 0) ||
           (strncmp(s_cmd_buf, "vent", 4) == 0) || (strncmp(s_cmd_buf, "netcfg", 6) == 0) ||
           (strncmp(s_cmd_buf, "dose", 4) == 0) || (strncmp(s_cmd_buf, "pulse", 5) == 0) ||
-          (strncmp(s_cmd_buf, "hsdi ", 5) == 0) || (strncmp(s_cmd_buf, "flow", 4) == 0))
+          (strncmp(s_cmd_buf, "hsdi ", 5) == 0) || (strncmp(s_cmd_buf, "flow", 4) == 0) ||
+          (strncmp(s_cmd_buf, "aer", 3) == 0))
       {
         extern volatile uint8_t s_mbreg_pend;
         extern char s_mbreg_cmd[160];
@@ -314,6 +315,8 @@ static const char DESC_MID[] =
 "{\"id\":\"rly.do\",\"name\":\"Relay Outputs\",\"kind\":\"bits\",\"width\":16,\"rw\":\"rw\",\"group\":\"rly\",\"f\":\"rly\"},"
 "{\"id\":\"vent.stage\",\"name\":\"Roof Vent Stage\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"vent\"},"
 "{\"id\":\"vent.mode\",\"name\":\"Roof Vent Mode\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"ventm\"},"
+"{\"id\":\"aer.state\",\"name\":\"Air Pump\",\"kind\":\"bool\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"aer\"},"
+"{\"id\":\"aer.mode\",\"name\":\"Air Pump Mode\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"aerm\"},"
 "{\"id\":\"dose.state\",\"name\":\"Dosing Pumps\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"dose\"},"
 "{\"id\":\"do.beep\",\"name\":\"Buzzer\",\"kind\":\"bool\",\"rw\":\"rw\",\"group\":\"io\",\"f\":\"beep\"},"
 "{\"id\":\"sys.ver\",\"name\":\"Firmware Version\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"sys\",\"f\":\"ver\"},"
@@ -860,6 +863,11 @@ void mqtt_app_task(void)
         extern int app_vent_cmd(const char *line, const char *src, char *out, uint16_t cap);
         (void)app_vent_cmd(s_mbreg_cmd, "cloud", s_mbreg_result, sizeof(s_mbreg_result));
       }
+      else if (strncmp(s_mbreg_cmd, "aer", 3) == 0)
+      {
+        extern int app_aer_cmd(const char *line, const char *src, char *out, uint16_t cap);
+        (void)app_aer_cmd(s_mbreg_cmd, "cloud", s_mbreg_result, sizeof(s_mbreg_result));
+      }
       else if (strncmp(s_mbreg_cmd, "dose", 4) == 0)
       {
         extern int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap);
@@ -948,7 +956,7 @@ void mqtt_app_task(void)
           if (app_diag_mods_dirty()) { desc_build(); s_desc_pub_err = 1; tcpip_callback(mqtt_desc_republish_cb, NULL); } }
       { extern uint32_t app_se_hs608_count(void); extern uint32_t app_se_hs608_fail(void);
         snprintf(s_pub_buf, sizeof(s_pub_buf),
-               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"dose\":\"%s\",\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
+               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"aer\":%u,\"aerm\":\"%s\",\"dose\":\"%s\",\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
                FW_VERSION, (s_broker == BRK_AWS) ? "aws" : (s_broker == BRK_LAN) ? "lan" : "pub",
                (s_clone == APP_AC_GENUINE) ? "ok" : (s_clone == APP_AC_ABSENT) ? "nose" : "clone",
                (unsigned long)app_se_hs608_count(), (unsigned long)app_se_hs608_fail(), (int)s_desc_pub_err,
@@ -974,6 +982,8 @@ void mqtt_app_task(void)
                (unsigned)app_demo_relays(),
                (unsigned)({ extern uint8_t app_vent_stage(void); app_vent_stage(); }),
                ({ extern const char *app_vent_mode(void); app_vent_mode(); }),
+               (unsigned)({ extern uint8_t app_aer_state(void); app_aer_state(); }),
+               ({ extern const char *app_aer_mode(void); app_aer_mode(); }),
                ({ extern const char *app_dose_hb(void); app_dose_hb(); }),
                mb_str, app_p5_str(),
                (unsigned)cpu7, (unsigned)cpu4, (unsigned long)stkmin,

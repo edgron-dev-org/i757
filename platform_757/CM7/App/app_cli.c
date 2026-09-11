@@ -46,7 +46,7 @@ static void cmd_help(void)
          "  mbcfg       show/set modbus ports (mbcfg 485a slave 9600 8N1 addr=1 | 485a off | tcp on)\n\r"
          "  mbpoll      one-shot master txn (mbpoll 485b 1 4 0 4 | mbpoll tcp <ip> 1 3 0 4)\n\r"
          "  netcfg      DHCP-timeout fallback IP: netcfg [<ip> <mask> <gw> [dns] | default]\n\r"
-         "  dose        dosing pumps: dose a|b|acid|ab <ml> | stop|auto|off | cal|ec|ph|mix|phsrc|phdiv\n\r"
+         "  dose        dosing pumps: dose a|b|acid|base|ab <ml> | stop|auto|off | cal|shot|ec|ph|mix|phsrc|phdiv\n\r"
          "  tasks       both cores: task list, stack headroom, heap (alias: ps)\n\r"
          "  pio         process-image scanner: pio setup [port addr] | dump | do <pt> <ch> <0|1> | hr <pt> <ch> <v>\n\r"
          "  pfstat      power-fail layers status (battery/retain/blackbox slot)\n\r"
@@ -178,6 +178,7 @@ static void cli_exec(char *line)
   { extern int app_pf_cli(char *l); if (app_pf_cli(line)) { return; } }         /* pfstat/pftest/pfreport (power-fail three-layer API) */
   { extern int app_datalog_cli(char *l); if (app_datalog_cli(line)) { return; } } /* note/logcfg/logstat/logget (Data_Logging_and_Event_Journal.md) */
   { extern int app_vent_cli(char *l); if (app_vent_cli(line)) { return; } }       /* vent: greenhouse roof-vent control (app_vent.c) */
+  { extern int app_aer_cli(char *l); if (app_aer_cli(line)) { return; } }         /* aer: reservoir air pump by water temperature (app_aer.c) */
   { extern int app_dose_cli(char *l); if (app_dose_cli(line)) { return; } }       /* dose: nutrient/pH pumps (app_dose.c) */
   { extern int app_flowmon_cli(char *l); if (app_flowmon_cli(line)) { return; } } /* flow: gutter feed-flow monitor / alarm (app_flowmon.c) */
   { extern int app_pulse_cli(char *l); if (app_pulse_cli(line)) { return; } }     /* pulse/hsdi: bench reset-reproduction (app_user.c) */

@@ -101,6 +101,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app_vent.c                                # greenhouse roof-vent temperature control (3-stage window, 2026-08-27)
     App/app_dose.c                                # nutrient/pH dosing pumps (3x peristaltic on relay coils 0..2, 2026-08-31)
     App/app_flowmon.c                             # per-gutter feed-flow monitor: blocked-line alarm + buzzer + cloud event (2026-09-04)
+    App/app_aer.c                                 # reservoir aeration: air pump on relay coil 8 switched on water temperature (2026-09-08)
     App/app_ffunicode.c                           # FatFs LFN unicode hooks, ASCII-only shim (_USE_LFN=1)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../modbus/modbus_core.c
     App/littlefs/lfs.c
