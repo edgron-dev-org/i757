@@ -19,6 +19,7 @@ void app_dose_init(void);   /* call from app_user_init(), AFTER app_io_setup() *
  *   dose cal a|b|acid|base <ml_per_min>   -> pump flow calibration
  *   dose ec <uS> [db] | dose ph <x100> [db] | dose mix <min>  -> targets, decision cycle
  *   dose shot acid|base <ml>              -> per-cycle auto shot caps
+ *   dose tank <L>        -> reservoir volume for the top-up feed-forward (water meter -> A/B while filling)
  *   dose learn [reset]   -> learned gains/drifts (persisted in littlefs "dose.lrn")
  * Returns 1 if the line was a dose command (out filled), 0 otherwise. */
 int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap);
