@@ -72,6 +72,15 @@
  *     restarts after each compensation shot so the loop cannot double-dose on the
  *     unmixed dip; the remainder below one minimum shot rides the EC feed-forward.
  *     `dose tank <L>` = reservoir volume (dose.cfg field 18, default 165 L).
+ *   - 2026-09-15 (38 h review of the above, user rulings): (a) the typical fill volume is
+ *     learned (dose.lrn) and the first drop fires a shot for 85 % of it at once, the meter
+ *     settles the rest when the valve closes - the water always comes in faster than the
+ *     pumps can follow, so waiting for the meter meant dosing after the dip; (b) top-up
+ *     shots gate on queue room, not an idle pump (a fast fill had closed its episode while
+ *     the first shot was still pumping: remainder lost, learning sample split in two);
+ *     (c) gains are a forgetting sum-ratio (sum resp / sum ml) instead of a per-sample
+ *     EMA, so shot size is the weight and small-shot noise averages out; (d) the learner's
+ *     start/end points and the loop's error use 60 s means of the 5 s reads.
  *   Parameters (`dose cal/ec/ph/mix/shot`) persist in littlefs ("dose.cfg", netcfg pattern):
  *   every change saves immediately, boot reloads. MODE persists too since 2026-09-02
  *   (user ruling, after a pair of silent resets killed the closed loop unnoticed):
@@ -141,8 +150,15 @@ extern uint32_t app_flow_dl(void);          /* app_user.c: top-up water meter, 0
 #define SEED_DRIFT_EC      (-4000)  /* ~ -100 uS/day uptake = -4 uS/h */
 #define DRIFT_PH_MAX       5000     /* |0.05 pH/h| plausibility clamp */
 #define DRIFT_EC_MAX       50000    /* |50 uS/h| */
-#define LEARN_ALPHA_PCT    30U      /* gain: 30 % step toward each observation */
+#define LEARN_FORGET_PCT   80U      /* gain = sum(response) / sum(ml) over a forgetting window: every new sample scales the
+                                     * old sums by 80 % (~5 samples of memory). A 15 ml shot (5 uS, +-3 uS noise) and an 80 ml
+                                     * top-up shot (30 uS) enter with their own ml as weight, so big shots dominate and small
+                                     * shots' noise averages out instead of kicking the estimate around (2026-09-15: the
+                                     * per-sample EMA read 531 then 280 /ml from one split fill, sum-ratio gives 378) */
+#define LEARN_REF_ML_AB    50U      /* the seed / a reloaded gain enter the sums as one sample of this size */
+#define LEARN_REF_ML_PH    5U
 #define DRIFT_ALPHA_PCT    20U      /* drift: 20 % */
+#define AVG_N              12U      /* control/learning use a 60 s mean of the 5 s readings (single reads are +-2..3 uS) */
 #define LEARN_MIN_PH       4        /* learn gain only when the expected move is >= 0.04 pH (probe noise 0.01) */
 #define LEARN_MIN_EC       4        /* ... >= 4 uS (EC noise ~2) */
 #define STRIKE_MIN_PH      8        /* count a "no response" only on shots expected to move >= 0.08 pH */
@@ -155,6 +171,9 @@ extern uint32_t app_flow_dl(void);          /* app_user.c: top-up water meter, 0
 #define DEF_TANK_DL        1650U    /* reservoir volume, 0.1 L (greenhouse 165 L) -> `dose tank` */
 #define TOPUP_QUIET_S      60U      /* meter silent this long = fill episode over (app_user ledger uses the same) */
 #define TOPUP_CAP_ML       200U     /* A and B each, per fill episode (= manual single-shot max, ~10 L of fill) */
+#define TOPUP_PRED_PCT     85U      /* predicted first shot = this share of the learned typical fill (A/B cannot be undone,
+                                     * so under-predict and top the rest up from the meter when the valve closes) */
+#define TOPUP_VOL_ALPHA_PCT 30U     /* typical fill volume: 30 % step per fill (float-valve hysteresis, ~constant per site) */
 #define SENS_BAD_S         600U     /* invalid this long -> FAULT (journal once) */
 #define EC_DRY_FLOOR       300U     /* below this = probe dry / tank empty: no dosing */
 #define CAP_AB_ML          800U     /* per pump per day (500 -> 800 on 2026-09-12: 290 ml/day measured with the
@@ -193,11 +212,16 @@ static uint16_t s_ph_target = DEF_PH_TARGET, s_ph_db = DEF_PH_DB;
 static uint16_t s_ec_ml = DEF_EC_ML, s_acid_ml = DEF_ACID_ML, s_base_ml = DEF_BASE_ML;
 static uint32_t s_mix_s = DEF_MIX_S;
 static uint16_t s_tank_dl = DEF_TANK_DL;  /* reservoir volume, 0.1 L (top-up feed-forward) */
+static uint8_t  s_ph_dir  = 0U;           /* pH pumps allowed: 0 both, 1 base only, 2 acid only (2026-09-13: one fertiliser drifts
+                                           * pH one way; the opposite pump only fights the base/acid that is already in the tank) */
 
-/* run state: one pump at a time + a small shot queue (A-then-B is two entries) */
+/* run state: one pump at a time (A and B concentrates must not meet undiluted) + a shot queue
+ * (A-then-B is two entries; 8 deep since 2026-09-15 so a top-up settlement can queue behind a
+ * shot that is still pumping instead of waiting for an idle pump) */
+#define DOSE_QLEN 8U
 static int8_t   s_run = -1;               /* pump index, -1 = idle */
 static uint32_t s_run_ms = 0;             /* remaining */
-static struct { uint8_t pump; uint16_t ml; } s_q[4];
+static struct { uint8_t pump; uint16_t ml; } s_q[DOSE_QLEN];
 static uint8_t  s_qn = 0;
 
 static uint32_t s_ml_today[DOSE_PUMPS];   /* commanded volume, reset daily / on `dose auto` */
@@ -206,6 +230,11 @@ static uint32_t s_wait_s = 0, s_bad_s = 0;
 static uint8_t  s_faulted = 0;
 static uint8_t  s_flowhold = 0;           /* circulation lost: auto loop held (journaled once) */
 static uint16_t s_ec = SENS_INVAL, s_ph = SENS_INVAL;   /* last readings for status */
+/* 60 s means of the 5 s readings (2026-09-15): the learner's start/end points and the loop's
+ * error term use these; the validity guards (dry floor, invalid) keep using the raw read */
+static uint16_t s_ec_ring[AVG_N], s_ph_ring[AVG_N];
+static uint8_t  s_ring_i = 0, s_ring_n = 0;
+static uint16_t s_ec_avg = SENS_INVAL, s_ph_avg = SENS_INVAL;
 
 static const char *mode_name(uint8_t m)
 { return (m == M_AUTO) ? "auto" : (m == M_RELEASE) ? "release" : "off"; }
@@ -215,13 +244,22 @@ static uint32_t s_gain[3]  = { SEED_GAIN_AB, SEED_GAIN_ACID, SEED_GAIN_BASE };  
 static int32_t  s_drift_ph = SEED_DRIFT_PH, s_drift_ec = SEED_DRIFT_EC;
 static uint8_t  s_strikes[3];             /* no-response counters per gain slot */
 static uint8_t  s_unlearned[3];           /* consecutive auto shots too small to learn from (probe trigger) */
+static int32_t  s_lsum_ml[3]   = { LEARN_REF_ML_AB, LEARN_REF_ML_PH, LEARN_REF_ML_PH };   /* forgetting sums behind s_gain: */
+static int32_t  s_lsum_resp[3] = { LEARN_REF_ML_AB * SEED_GAIN_AB, LEARN_REF_ML_PH * SEED_GAIN_ACID,
+                                   LEARN_REF_ML_PH * SEED_GAIN_BASE };                     /* ml, and response (fine / 1000 = gain units x ml) */
 /* top-up feed-forward state */
 static uint32_t s_tu_last_dl;             /* meter reading at the previous 5 s poll */
 static uint8_t  s_tu_primed, s_tu_in;     /* meter baseline taken / a fill episode is open */
-static int32_t  s_tu_owed;                /* EC owed back for water already in, fine units (uS x1000) */
+static int32_t  s_tu_owed;                /* EC owed back for water already in, fine units (uS x1000); negative = pre-paid by the prediction */
 static uint32_t s_tu_ep_dl, s_tu_ep_ml, s_tu_quiet_s;   /* this episode: litres x10 in, ml dosed (each pump), silence */
+static uint16_t s_tu_typ_dl = 0;          /* learned typical fill volume, 0.1 L (0 = not learned yet; dose.lrn) */
+static uint16_t s_tu_pred_dl = 0;         /* this episode: volume the opening shot was sized for (0 = no prediction) */
+static int32_t  s_tu_ep_dil;              /* this episode: dilution owed so far, fine units (the learner adds it back) */
+static uint16_t s_tu_ec0 = SENS_INVAL;    /* EC before the first drop came in (the episode's learning baseline) */
+static int32_t  s_tu_carry;               /* top-up remainder below one shot, carried into the loop's next EC decision */
 static int32_t  s_ff_ph = 0, s_ff_ec = 0; /* carried feed-forward need, FINE units (pH x100 x1000 / uS x1000) */
-static struct { uint8_t kind; uint8_t slot; uint16_t ml; uint16_t ec0, ph0; uint32_t flow0; } s_last;
+static struct { uint8_t kind; uint8_t slot; uint16_t ml; uint16_t ec0, ph0; uint32_t flow0; int32_t dil; } s_last;
+                                          /* dil: known dilution (fine) between ec0 and now - only a top-up episode sets it */
                                           /* what the previous cycle did: kind 0 idle, 1 EC, 2 pH */
 static uint8_t  s_confound = 1U;          /* manual shot / hold / boot: do not learn from this cycle */
 static int32_t  s_acc_dph = 0, s_acc_dec = 0;     /* drift window: sum of observed deltas (fine units) ... */
@@ -253,7 +291,7 @@ static void dose_save(void)
   if (fs == NULL) { return; }
   if (lfs_file_opencfg(fs, &f, DOSE_FILE, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC,
                        (struct lfs_file_config *)&s_dfcfg) != 0) { return; }
-  snprintf(buf, sizeof(buf), "%u %u %u %u %u %u %u %u %u %lu %u %u %u %u %u %u %u %u\n",
+  snprintf(buf, sizeof(buf), "%u %u %u %u %u %u %u %u %u %lu %u %u %u %u %u %u %u %u %u\n",
            (unsigned)s_mlmin[P_A], (unsigned)s_mlmin[P_B], (unsigned)s_mlmin[P_ACID],
            (unsigned)s_ec_target, (unsigned)s_ec_db,
            (unsigned)s_ph_target, (unsigned)s_ph_db,
@@ -262,7 +300,8 @@ static void dose_save(void)
            (unsigned)s_ph_src, (unsigned)s_ph_div,
            (unsigned)s_ec_src, (unsigned)s_ec_div,        /* fields 14/15: EC source policy (2026-09-04) */
            (unsigned)s_mlmin[P_BASE], (unsigned)s_base_ml,  /* fields 16/17: base pump (2026-09-11) */
-           (unsigned)s_tank_dl);                             /* field 18: tank volume (2026-09-12) */
+           (unsigned)s_tank_dl,                              /* field 18: tank volume (2026-09-12) */
+           (unsigned)s_ph_dir);                              /* field 19: pH pump direction (2026-09-13) */
   (void)lfs_file_write(fs, &f, buf, strlen(buf));
   (void)lfs_file_close(fs, &f);
 }
@@ -273,7 +312,7 @@ static void dose_load(void)
   lfs_file_t f;
   char buf[128];
   unsigned ca, cb, cc, ect, ecd, pht, phd, eml, aml, bmode = 0, psrc = 0, pdiv = 10, esrc = 0, ediv = 100;
-  unsigned cbs = DEF_MLMIN, bml = DEF_BASE_ML, tank = DEF_TANK_DL;
+  unsigned cbs = DEF_MLMIN, bml = DEF_BASE_ML, tank = DEF_TANK_DL, pdir = 0;
   unsigned long mix;
   int nf;
   if (s_ploaded || (fs == NULL)) { return; }
@@ -284,9 +323,9 @@ static void dose_load(void)
   (void)lfs_file_close(fs, &f);
   if (n <= 0) { return; }
   buf[n] = 0;
-  nf = sscanf(buf, "%u %u %u %u %u %u %u %u %u %lu %u %u %u %u %u %u %u %u",
+  nf = sscanf(buf, "%u %u %u %u %u %u %u %u %u %lu %u %u %u %u %u %u %u %u %u",
               &ca, &cb, &cc, &ect, &ecd, &pht, &phd, &eml, &aml, &mix, &bmode, &psrc, &pdiv, &esrc, &ediv,
-              &cbs, &bml, &tank);
+              &cbs, &bml, &tank, &pdir);
   if (nf < 10) { return; }                   /* 10 fields = pre-boot-mode file, mode stays OFF */
   if (nf >= 13)                              /* pH source policy (append-only tail, 09-02) */
   {
@@ -306,6 +345,10 @@ static void dose_load(void)
   if (nf >= 18)                              /* tank volume (append-only tail, 09-12) */
   {
     if ((tank >= 200U) && (tank <= 50000U)) { s_tank_dl = (uint16_t)tank; }
+  }
+  if (nf >= 19)                              /* pH pump direction (append-only tail, 09-13) */
+  {
+    if (pdir <= 2U) { s_ph_dir = (uint8_t)pdir; }
   }
   /* the same bounds the commands enforce — a corrupt field keeps its compile-time default */
   if ((ca >= 5U) && (ca <= 600U)) { s_mlmin[0] = (uint16_t)ca; }
@@ -335,20 +378,31 @@ static void dose_load(void)
 }
 
 /* ---- learned model persistence (littlefs "dose.lrn", one line, all integers) ----
- * gain_ab gain_acid gain_base drift_ph drift_ec. Written on every learning update (a few
- * times a day); a missing/corrupt file keeps the factory seeds. `dose learn reset` deletes it. */
+ * gain_ab gain_acid gain_base drift_ph drift_ec [fill_dl sum_ml0 sum_resp0 sum_ml1 sum_resp1 sum_ml2 sum_resp2]
+ * (the bracketed tail since 2026-09-15; an older 5-field file re-seeds the sums from its gains).
+ * Written on every learning update (a few times a day); a missing/corrupt file keeps the
+ * factory seeds. `dose learn reset` deletes it. */
 #define LEARN_FILE "dose.lrn"
+static const uint32_t s_lref[3] = { LEARN_REF_ML_AB, LEARN_REF_ML_PH, LEARN_REF_ML_PH };
+static void learn_seed_sums(uint8_t slot)   /* make the sums agree with s_gain[slot] as one reference-size sample */
+{
+  s_lsum_ml[slot]   = (int32_t)s_lref[slot];
+  s_lsum_resp[slot] = (int32_t)(s_lref[slot] * s_gain[slot]);
+}
+
 static void learn_save(void)
 {
   lfs_t *fs = app_lfs();
   lfs_file_t f;
-  char buf[64];
+  char buf[160];
   if (fs == NULL) { return; }
   if (lfs_file_opencfg(fs, &f, LEARN_FILE, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC,
                        (struct lfs_file_config *)&s_dfcfg) != 0) { return; }
-  snprintf(buf, sizeof(buf), "%lu %lu %lu %ld %ld\n",
+  snprintf(buf, sizeof(buf), "%lu %lu %lu %ld %ld %u %ld %ld %ld %ld %ld %ld\n",
            (unsigned long)s_gain[0], (unsigned long)s_gain[1], (unsigned long)s_gain[2],
-           (long)s_drift_ph, (long)s_drift_ec);
+           (long)s_drift_ph, (long)s_drift_ec, (unsigned)s_tu_typ_dl,
+           (long)s_lsum_ml[0], (long)s_lsum_resp[0], (long)s_lsum_ml[1], (long)s_lsum_resp[1],
+           (long)s_lsum_ml[2], (long)s_lsum_resp[2]);
   (void)lfs_file_write(fs, &f, buf, strlen(buf));
   (void)lfs_file_close(fs, &f);
 }
@@ -357,24 +411,36 @@ static void learn_load(void)
 {
   lfs_t *fs = app_lfs();
   lfs_file_t f;
-  char buf[64];
-  unsigned long g0, g1, g2; long dp, de;
+  char buf[160];
+  unsigned long g0, g1, g2; long dp, de; unsigned fill = 0; long sm[3] = { 0, 0, 0 }, sr[3] = { 0, 0, 0 };
+  int nf;
   if (fs == NULL) { return; }
   if (lfs_file_opencfg(fs, &f, LEARN_FILE, LFS_O_RDONLY, (struct lfs_file_config *)&s_dfcfg) != 0) { return; }
   lfs_ssize_t n = lfs_file_read(fs, &f, buf, sizeof(buf) - 1U);
   (void)lfs_file_close(fs, &f);
   if (n <= 0) { return; }
   buf[n] = 0;
-  if (sscanf(buf, "%lu %lu %lu %ld %ld", &g0, &g1, &g2, &dp, &de) != 5) { return; }
+  nf = sscanf(buf, "%lu %lu %lu %ld %ld %u %ld %ld %ld %ld %ld %ld", &g0, &g1, &g2, &dp, &de, &fill,
+              &sm[0], &sr[0], &sm[1], &sr[1], &sm[2], &sr[2]);
+  if (nf < 5) { return; }
   /* same clamps the learner enforces: a corrupt value falls back to its seed */
   if ((g0 >= SEED_GAIN_AB / 5U) && (g0 <= SEED_GAIN_AB * 5U))     { s_gain[0] = (uint32_t)g0; }
   if ((g1 >= SEED_GAIN_ACID / 5U) && (g1 <= SEED_GAIN_ACID * 5U)) { s_gain[1] = (uint32_t)g1; }
   if ((g2 >= SEED_GAIN_BASE / 5U) && (g2 <= SEED_GAIN_BASE * 5U)) { s_gain[2] = (uint32_t)g2; }
   if ((dp >= -DRIFT_PH_MAX) && (dp <= DRIFT_PH_MAX)) { s_drift_ph = (int32_t)dp; }
   if ((de >= -DRIFT_EC_MAX) && (de <= DRIFT_EC_MAX)) { s_drift_ec = (int32_t)de; }
-  printf("[DOSE] learned from " LEARN_FILE ": gain ab=%lu acid=%lu base=%lu drift ph=%ld ec=%ld\n\r",
+  if ((nf >= 6) && (fill <= 5000U)) { s_tu_typ_dl = (uint16_t)fill; }   /* <= 500 L per fill, else not learned */
+  for (uint8_t k = 0; k < 3U; k++)
+  {
+    /* sums are trusted only when they reproduce the stored gain; otherwise re-seed from it */
+    if ((nf >= 12) && (sm[k] > 0) && (sm[k] <= 100000L) && (sr[k] > 0) &&
+        ((unsigned long)(sr[k] / sm[k]) >= s_gain[k] * 9U / 10U) && ((unsigned long)(sr[k] / sm[k]) <= s_gain[k] * 11U / 10U))
+    { s_lsum_ml[k] = (int32_t)sm[k]; s_lsum_resp[k] = (int32_t)sr[k]; }
+    else { learn_seed_sums(k); }
+  }
+  printf("[DOSE] learned from " LEARN_FILE ": gain ab=%lu acid=%lu base=%lu drift ph=%ld ec=%ld fill=%u.%uL\n\r",
          (unsigned long)s_gain[0], (unsigned long)s_gain[1], (unsigned long)s_gain[2],
-         (long)s_drift_ph, (long)s_drift_ec);
+         (long)s_drift_ph, (long)s_drift_ec, (unsigned)(s_tu_typ_dl / 10U), (unsigned)(s_tu_typ_dl % 10U));
 }
 
 static void learn_reset(void)
@@ -382,6 +448,8 @@ static void learn_reset(void)
   lfs_t *fs = app_lfs();
   s_gain[0] = SEED_GAIN_AB; s_gain[1] = SEED_GAIN_ACID; s_gain[2] = SEED_GAIN_BASE;
   s_drift_ph = SEED_DRIFT_PH; s_drift_ec = SEED_DRIFT_EC;
+  for (uint8_t k = 0; k < 3U; k++) { learn_seed_sums(k); }
+  s_tu_typ_dl = 0U;
   memset(s_strikes, 0, sizeof(s_strikes));
   memset(s_unlearned, 0, sizeof(s_unlearned));
   s_ff_ph = 0; s_ff_ec = 0; s_last.kind = K_IDLE;
@@ -516,6 +584,7 @@ static void learn_step(uint16_t ec, uint16_t ph)
   int     topup = (app_flow_dl() != s_last.flow0);       /* float valve fed the tank: dilution + alkalinity */
   int     ph_ok = (ph != (uint16_t)SENS_INVAL) && (s_last.ph0 != (uint16_t)SENS_INVAL);
   int32_t d_ec  = (int32_t)ec - (int32_t)s_last.ec0;                   /* sensor units */
+  int32_t d_ec_f = d_ec * 1000L + s_last.dil;                           /* fine, with a top-up episode's known dilution added back */
   int32_t d_ph  = ph_ok ? ((int32_t)ph - (int32_t)s_last.ph0) : 0;
   int32_t dosed_ec = 0, dosed_ph = 0;                     /* what the last shot was expected to do (fine units) */
 
@@ -535,7 +604,7 @@ static void learn_step(uint16_t ec, uint16_t ph)
     int32_t  lmin   = ((s_last.kind == K_EC) ? LEARN_MIN_EC  : LEARN_MIN_PH)  * 1000L;
     int32_t  smin   = ((s_last.kind == K_EC) ? STRIKE_MIN_EC : STRIKE_MIN_PH) * 1000L;
     int32_t  resp, obs;
-    if (s_last.kind == K_EC) { dosed_ec = expect; resp = d_ec * 1000L - (s_drift_ec * dt_s / 3600L); }
+    if (s_last.kind == K_EC) { dosed_ec = expect; resp = d_ec_f - (s_drift_ec * dt_s / 3600L); }
     else
     {
       dosed_ph = (slot == 1U) ? -expect : expect;
@@ -558,15 +627,25 @@ static void learn_step(uint16_t ec, uint16_t ph)
       }
       else
       {
+        /* sum-ratio estimator with forgetting (2026-09-15): gain = sum(resp) / sum(ml). Each shot
+         * enters with its own ml as weight, so an 80 ml top-up shot outweighs five 15 ml ones and
+         * the +-3 uS read noise of small shots averages out instead of stepping the gain */
         uint32_t old = s_gain[slot];
-        int32_t  g = (int32_t)old + (obs - (int32_t)old) * (int32_t)LEARN_ALPHA_PCT / 100;
-        if (g < (int32_t)(seed / 5U)) { g = (int32_t)(seed / 5U); }
-        if (g > (int32_t)(seed * 5U)) { g = (int32_t)(seed * 5U); }
+        int32_t  g;
+        s_lsum_ml[slot]   = s_lsum_ml[slot]   * (int32_t)LEARN_FORGET_PCT / 100 + (int32_t)s_last.ml;
+        s_lsum_resp[slot] = s_lsum_resp[slot] * (int32_t)LEARN_FORGET_PCT / 100 + resp;
+        g = (s_lsum_ml[slot] > 0) ? (s_lsum_resp[slot] / s_lsum_ml[slot]) : (int32_t)old;
+        if ((g < (int32_t)(seed / 5U)) || (g > (int32_t)(seed * 5U)))   /* clamped: keep the sums consistent with the clamp */
+        {
+          g = (g < (int32_t)(seed / 5U)) ? (int32_t)(seed / 5U) : (int32_t)(seed * 5U);
+          s_gain[slot] = (uint32_t)g; learn_seed_sums(slot);
+        }
         s_gain[slot] = (uint32_t)g; s_strikes[slot] = 0; s_unlearned[slot] = 0;
         learn_save();
-        app_log_event("SYSTEM", "dose learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld)",
+        app_log_event("SYSTEM", "dose learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld%s, %ld/ml over %ldml)",
                       nm, (unsigned long)old, (unsigned long)s_gain[slot], (unsigned)s_last.ml,
-                      (long)((s_last.kind == K_EC) ? d_ec : d_ph));
+                      (long)((s_last.kind == K_EC) ? (d_ec_f / 1000L) : d_ph), s_last.dil ? " net of top-up" : "",
+                      (long)obs, (long)s_lsum_ml[slot]);
       }
     }
     s_last.kind = K_IDLE;
@@ -574,7 +653,7 @@ static void learn_step(uint16_t ec, uint16_t ph)
 
   /* drift window: every clean cycle adds its delta minus the shot's expected effect; after
    * DRIFT_WIN_S the residual over time is the drift (fertilizer acidity, uptake, CO2) */
-  s_acc_dec += d_ec * 1000L; s_acc_dose_ec += dosed_ec;
+  s_acc_dec += d_ec_f; s_acc_dose_ec += dosed_ec;
   if (ph_ok) { s_acc_dph += d_ph * 1000L; s_acc_dose_ph += dosed_ph; }
   s_acc_t += (uint32_t)dt_s;
   if (s_acc_t >= DRIFT_WIN_S)
@@ -586,12 +665,29 @@ static void learn_step(uint16_t ec, uint16_t ph)
     if ((obs_ph >= -DRIFT_PH_MAX) && (obs_ph <= DRIFT_PH_MAX))
     { s_drift_ph += (obs_ph - s_drift_ph) * (int32_t)DRIFT_ALPHA_PCT / 100; }
     learn_save();
-    app_log_event("SYSTEM", "dose learn drift ph %ld ec %ld (x1000/h; %luh window moved ph %ld ec %ld, shots %ld/%ld)",
+    app_log_event("SYSTEM", "dose learn drift ph %ld ec %ld (x1000/h; %luh window moved ph %ld ec %ld, dosed %ld/%ld)",
                   (long)s_drift_ph, (long)s_drift_ec, (unsigned long)(s_acc_t / 3600U),
                   (long)(s_acc_dph / 1000L), (long)(s_acc_dec / 1000L),
                   (long)(s_acc_dose_ph / 1000L), (long)(s_acc_dose_ec / 1000L));
     s_acc_dph = 0; s_acc_dec = 0; s_acc_dose_ph = 0; s_acc_dose_ec = 0; s_acc_t = 0;
   }
+}
+
+/* 60 s means (2026-09-15): called once per 5 s reading, in every mode that reads the sensors.
+ * A mean is valid once at least half the window holds valid reads; else SENS_INVAL. */
+static uint16_t ring_mean(const uint16_t *r)
+{
+  uint32_t sum = 0; uint8_t n = 0;
+  for (uint8_t k = 0; k < s_ring_n; k++) { if (r[k] != (uint16_t)SENS_INVAL) { sum += r[k]; n++; } }
+  return (n >= (uint8_t)(AVG_N / 2U)) ? (uint16_t)((sum + n / 2U) / n) : (uint16_t)SENS_INVAL;
+}
+static void sens_track(uint16_t ec, uint16_t ph)
+{
+  s_ec_ring[s_ring_i] = ec; s_ph_ring[s_ring_i] = ph;
+  s_ring_i = (uint8_t)((s_ring_i + 1U) % AVG_N);
+  if (s_ring_n < AVG_N) { s_ring_n++; }
+  s_ec_avg = ring_mean(s_ec_ring);
+  s_ph_avg = ring_mean(s_ph_ring);
 }
 
 static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, circulation ok */
@@ -600,6 +696,7 @@ static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, c
   uint16_t ec = dose_ec_read(ok), ph = dose_ph_read(ok);
   s_ec = ok ? ec : (uint16_t)SENS_INVAL;
   s_ph = ph;
+  sens_track(s_ec, s_ph);
   /* EC gates the eval (fertilizer is the primary loop); a dead/untrusted pH only
    * stops the pH branch — A/B dosing continues */
   int valid = ok && (ec != SENS_INVAL) && (ec >= EC_DRY_FLOOR);
@@ -625,6 +722,9 @@ static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, c
   if (s_tu_in) { return; }                /* valve open: the top-up feed-forward is dosing on volume; decide once it closes */
 
   /* ---- decision point: close the books on the last cycle, then decide this one ---- */
+  /* the books and the error term use the 60 s means; a sensor the guards above accepted stays accepted */
+  if (s_ec_avg != (uint16_t)SENS_INVAL) { ec = s_ec_avg; }
+  if ((ph != (uint16_t)SENS_INVAL) && (s_ph_avg != (uint16_t)SENS_INVAL)) { ph = s_ph_avg; }
   learn_step(ec, ph);
 
   {
@@ -634,26 +734,34 @@ static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, c
     int32_t err_ph = 0, need_ph = 0, ml_ph = 0;
     uint8_t ph_ok  = (ph != (uint16_t)SENS_INVAL);
 
-    s_ff_ec += -(s_drift_ec * dt_s / 3600L);                             /* uptake this cycle, carried (fine) */
+    s_ff_ec = s_tu_carry - (s_drift_ec * dt_s / 3600L);                  /* predicted uptake over the coming cycle + top-up remainder (fine).
+                                                                          * Not accumulated: the realised part of the drift is already in err
+                                                                          * (2026-09-13: += double-counted across quiet cycles) */
     if (s_ff_ec < 0) { s_ff_ec = 0; }                                     /* EC only has an UP pump */
     if (s_ff_ec > (int32_t)(s_ec_db * 2000U)) { s_ff_ec = (int32_t)(s_ec_db * 2000U); }
     need_ec = err_ec * 1000L + s_ff_ec;                                   /* fine units */
-    if (err_ec < -(int32_t)s_ec_db) { need_ec = 0; s_ff_ec = 0; }        /* above band: wait for uptake/top-up */
+    if (err_ec < -(int32_t)s_ec_db) { need_ec = 0; s_ff_ec = 0; s_tu_carry = 0; }   /* above band: wait for uptake/top-up */
     if (need_ec > 0) { ml_ab = need_ec / (int32_t)s_gain[0]; }            /* fine / (fine per ml) = ml */
     if (ml_ab > (int32_t)s_ec_ml) { ml_ab = (int32_t)s_ec_ml; }          /* `dose shot` = per-cycle cap */
 
     if (ph_ok)
     {
       err_ph = (int32_t)s_ph_target - (int32_t)ph;                        /* x100, + = too acidic */
-      s_ff_ph += -(s_drift_ph * dt_s / 3600L);                           /* fine */
+      s_ff_ph = -(s_drift_ph * dt_s / 3600L);                            /* one cycle of predicted drift (fine), same reasoning as EC */
       if (s_ff_ph > (int32_t)(s_ph_db * 2000U))  { s_ff_ph = (int32_t)(s_ph_db * 2000U); }
       if (s_ff_ph < -(int32_t)(s_ph_db * 2000U)) { s_ff_ph = -(int32_t)(s_ph_db * 2000U); }
       need_ph = err_ph * 1000L + s_ff_ph;
+      /* 2026-09-13 (greenhouse: a base probe's +0.03 overshoot was chased by 8 ml of acid from an empty acid bottle):
+       * (a) `dose phdir` - one fertiliser drifts pH one way, the opposite pump only fights what the other just put in;
+       * (b) inside the band never dose against the learned drift - the drift is the free actuator back to target */
+      if (((s_ph_dir == 1U) && (need_ph < 0)) || ((s_ph_dir == 2U) && (need_ph > 0))) { need_ph = 0; }
+      if ((err_ph >= -(int32_t)s_ph_db) && (err_ph <= (int32_t)s_ph_db) &&
+          (((need_ph < 0) && (s_drift_ph < 0)) || ((need_ph > 0) && (s_drift_ph > 0)))) { need_ph = 0; }
       if (need_ph > 0)      { ml_ph = need_ph / (int32_t)s_gain[2];  if (ml_ph > (int32_t)s_base_ml) { ml_ph = (int32_t)s_base_ml; } }
       else if (need_ph < 0) { ml_ph = -need_ph / (int32_t)s_gain[1]; if (ml_ph > (int32_t)s_acid_ml) { ml_ph = (int32_t)s_acid_ml; } }
     }
 
-    s_last.kind = K_IDLE; s_last.ec0 = ec; s_last.ph0 = ph; s_last.flow0 = app_flow_dl();
+    s_last.kind = K_IDLE; s_last.ec0 = ec; s_last.ph0 = ph; s_last.flow0 = app_flow_dl(); s_last.dil = 0;
 
     if (ml_ab >= (int32_t)MIN_SHOT_AB_ML)                                 /* EC first: fertilizer is the primary loop */
     {
@@ -665,7 +773,7 @@ static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, c
       }
       (void)shot_queue(P_A, (uint16_t)ml_ab, "auto", "ec-need");
       (void)shot_queue(P_B, (uint16_t)ml_ab, "auto", "ec-need");
-      s_last.kind = K_EC; s_last.slot = 0U; s_last.ml = (uint16_t)ml_ab; s_ff_ec = 0;
+      s_last.kind = K_EC; s_last.slot = 0U; s_last.ml = (uint16_t)ml_ab; s_ff_ec = 0; s_tu_carry = 0;
     }
     else if (ml_ph >= (int32_t)MIN_SHOT_PH_ML)
     {
@@ -692,52 +800,107 @@ static void dose_eval(void)               /* every 5 s, auto mode, pumps idle, c
   }
 }
 
+/* one top-up compensation shot (A and B, equal). Returns ml queued (0 = nothing / cap hit).
+ * Gate = queue room, NOT an idle pump (2026-09-15: a fast 3.7 L fill closed its episode while the
+ * first shot was still pumping, the remainder was never fired and the learner got two broken
+ * samples). Same sensor guard as the loop. */
+static int32_t topup_shot(int32_t ml, const char *why)
+{
+  if ((ml < (int32_t)MIN_SHOT_AB_ML) || (s_qn > (uint8_t)(DOSE_QLEN - 2U)) ||
+      (s_ec == (uint16_t)SENS_INVAL) || (s_ec < EC_DRY_FLOOR)) { return 0; }
+  if (ml > (int32_t)(TOPUP_CAP_ML - s_tu_ep_ml)) { ml = (int32_t)(TOPUP_CAP_ML - s_tu_ep_ml); }
+  if (ml < (int32_t)MIN_SHOT_AB_ML) { return 0; }
+  if ((s_ml_today[P_A] + (uint32_t)ml > CAP_AB_ML) || (s_ml_today[P_B] + (uint32_t)ml > CAP_AB_ML))
+  {
+    app_log_event("FAULT", "dose A/B daily cap %uml reached (top-up) -> auto off", (unsigned)CAP_AB_ML);
+    s_mode = M_OFF; dose_save(); s_tu_in = 0U; s_tu_owed = 0; s_tu_ep_dl = 0U; s_tu_pred_dl = 0U;
+    return 0;
+  }
+  (void)shot_queue(P_A, (uint16_t)ml, "auto", why);
+  (void)shot_queue(P_B, (uint16_t)ml, "auto", why);
+  s_tu_owed  -= ml * (int32_t)s_gain[0];
+  s_tu_ep_ml += (uint32_t)ml;
+  s_wait_s = s_mix_s;           /* restart the settling clock: the loop must not double-dose on the unmixed dip */
+  return ml;
+}
+
 /* top-up feed-forward: every 5 s in auto mode (pumps may be running - the deficit keeps
- * accumulating while a compensation shot is still pumping and is served next) */
+ * accumulating while a compensation shot is still pumping and is served next).
+ * 2026-09-15 (user: "the water always comes in faster than the pumps can follow - predict it"):
+ *   1. the typical fill volume is LEARNED (float-valve hysteresis is a site constant: 15 fills
+ *      here read 3.2..3.8 L) and kept in dose.lrn;
+ *   2. the first drop opens the episode and, when a typical volume is known, immediately queues
+ *      a shot sized for TOPUP_PRED_PCT of it - A/B cannot be taken back, so under-predict;
+ *   3. the meter keeps the books: anything owed beyond what was pre-paid is fired as soon as it
+ *      is a shot (mid-fill for a long fill, or at the close as the settlement), the remainder
+ *      below one shot rides the loop's feed-forward, an over-prediction (short fill) is left
+ *      to the drift;
+ *   4. the whole episode is ONE learning sample (all ml vs. EC change + metered dilution). */
 static void dose_topup_poll(void)
 {
   uint32_t dl = app_flow_dl(), d;
-  int32_t  ml;
   if (!s_tu_primed) { s_tu_primed = 1U; s_tu_last_dl = dl; return; }
   d = dl - s_tu_last_dl;
   s_tu_last_dl = dl;
   if (d != 0U)
   {
     /* fresh water at ~0 uS: each 0.1 L lowers EC by target x d / tank - owe that back (fine units) */
-    s_tu_owed += (int32_t)((uint64_t)d * s_ec_target * 1000ULL / s_tank_dl);
+    int32_t inc = (int32_t)((uint64_t)d * s_ec_target * 1000ULL / s_tank_dl);
+    if (!s_tu_in)
+    {
+      s_tu_in = 1U; s_tu_ep_ml = 0U; s_tu_ep_dil = 0; s_tu_pred_dl = 0U;
+      s_tu_ec0 = (s_ec_avg != (uint16_t)SENS_INVAL) ? s_ec_avg : s_ec;   /* baseline = EC before the first drop (60 s mean) */
+      if (s_tu_typ_dl != 0U)                                              /* predicted opening shot */
+      {
+        uint32_t pdl  = (uint32_t)s_tu_typ_dl * TOPUP_PRED_PCT / 100U;
+        int32_t  pml  = (int32_t)((uint64_t)pdl * s_ec_target * 1000ULL / s_tank_dl) / (int32_t)s_gain[0];
+        char why[32];
+        snprintf(why, sizeof(why), "top-up predict %lu.%luL", (unsigned long)(pdl / 10U), (unsigned long)(pdl % 10U));
+        if (topup_shot(pml, why) > 0) { s_tu_pred_dl = (uint16_t)pdl; }   /* s_tu_owed now negative = pre-paid */
+      }
+    }
+    s_tu_owed += inc; s_tu_ep_dil += inc;
     s_tu_ep_dl += d; s_tu_quiet_s = 0U;
-    if (!s_tu_in) { s_tu_in = 1U; s_tu_ep_ml = 0U; }
   }
   else if (s_tu_in) { s_tu_quiet_s += 5U; }
   if (!s_tu_in) { return; }
 
-  ml = s_tu_owed / (int32_t)s_gain[0];
-  if ((ml >= (int32_t)MIN_SHOT_AB_ML) && (s_run < 0) && (s_qn == 0U) &&
-      (s_ec != (uint16_t)SENS_INVAL) && (s_ec >= EC_DRY_FLOOR))          /* same sensor guard as the loop */
   {
-    char why[24];
-    if (ml > (int32_t)(TOPUP_CAP_ML - s_tu_ep_ml)) { ml = (int32_t)(TOPUP_CAP_ML - s_tu_ep_ml); }
+    /* metered settlement: whatever is owed beyond the pre-payment, once it is a shot */
+    int32_t ml = s_tu_owed / (int32_t)s_gain[0];
     if (ml >= (int32_t)MIN_SHOT_AB_ML)
     {
-      if ((s_ml_today[P_A] + (uint32_t)ml > CAP_AB_ML) || (s_ml_today[P_B] + (uint32_t)ml > CAP_AB_ML))
-      {
-        app_log_event("FAULT", "dose A/B daily cap %uml reached (top-up) -> auto off", (unsigned)CAP_AB_ML);
-        s_mode = M_OFF; dose_save(); s_tu_in = 0U; s_tu_owed = 0; s_tu_ep_dl = 0U;
-        return;
-      }
+      char why[24];
       snprintf(why, sizeof(why), "top-up %lu.%luL", (unsigned long)(s_tu_ep_dl / 10U), (unsigned long)(s_tu_ep_dl % 10U));
-      (void)shot_queue(P_A, (uint16_t)ml, "auto", why);
-      (void)shot_queue(P_B, (uint16_t)ml, "auto", why);
-      s_tu_owed  -= ml * (int32_t)s_gain[0];
-      s_tu_ep_ml += (uint32_t)ml;
-      s_wait_s = s_mix_s;         /* restart the settling clock: the loop must not double-dose on the unmixed dip */
+      if ((topup_shot(ml, why) == 0) && (s_tu_ep_ml >= TOPUP_CAP_ML)) { s_tu_owed = 0; }   /* episode cap: the rest is the loop's job */
+      if (s_mode != M_AUTO) { return; }                                                   /* daily cap tripped inside */
     }
-    else { s_tu_owed = 0; }       /* episode cap reached: whatever is left is the loop's job next cycle */
   }
-  if (s_tu_quiet_s >= TOPUP_QUIET_S)          /* fill over: the remainder below one shot rides the feed-forward */
+  if (s_tu_quiet_s >= TOPUP_QUIET_S)          /* fill over */
   {
-    if (s_tu_owed > 0) { s_ff_ec += s_tu_owed; }
-    s_tu_owed = 0; s_tu_in = 0U; s_tu_ep_dl = 0U; s_tu_quiet_s = 0U;
+    uint16_t old_typ = s_tu_typ_dl;
+    if (s_tu_owed > 0) { s_tu_carry += s_tu_owed; }   /* below one shot: rides the loop's feed-forward (over-payment: drift's job) */
+    /* learn the typical fill volume (EMA; first fill seeds it) */
+    if (s_tu_ep_dl <= 5000U)
+    {
+      if (s_tu_typ_dl == 0U) { s_tu_typ_dl = (uint16_t)s_tu_ep_dl; }
+      else { s_tu_typ_dl = (uint16_t)((int32_t)s_tu_typ_dl + ((int32_t)s_tu_ep_dl - (int32_t)s_tu_typ_dl) * (int32_t)TOPUP_VOL_ALPHA_PCT / 100); }
+      learn_save();
+    }
+    app_log_event("SYSTEM", "dose top-up %lu.%luL: %uml each (predicted %u.%uL, typical %u.%u->%u.%uL)",
+                  (unsigned long)(s_tu_ep_dl / 10U), (unsigned long)(s_tu_ep_dl % 10U), (unsigned)s_tu_ep_ml,
+                  (unsigned)(s_tu_pred_dl / 10U), (unsigned)(s_tu_pred_dl % 10U),
+                  (unsigned)(old_typ / 10U), (unsigned)(old_typ % 10U), (unsigned)(s_tu_typ_dl / 10U), (unsigned)(s_tu_typ_dl % 10U));
+    if ((s_tu_ep_ml >= MIN_SHOT_AB_ML) && (s_tu_ec0 != (uint16_t)SENS_INVAL) && (s_tu_ec0 >= EC_DRY_FLOOR))
+    {
+      /* hand the whole episode to the learner as one big A/B shot: the dilution is known from the
+       * meter, so the next decision point can learn the gain from it - top-up shots are the largest,
+       * cleanest samples the loop ever fires (2026-09-13; before, any meter movement dropped the cycle) */
+      s_last.kind = K_EC; s_last.slot = 0U; s_last.ml = (uint16_t)s_tu_ep_ml;
+      s_last.ec0 = s_tu_ec0; s_last.ph0 = (uint16_t)SENS_INVAL;   /* fresh water moves pH too: keep pH out of this sample */
+      s_last.flow0 = dl; s_last.dil = s_tu_ep_dil;
+    }
+    s_tu_owed = 0; s_tu_in = 0U; s_tu_ep_dl = 0U; s_tu_quiet_s = 0U; s_tu_ep_dil = 0; s_tu_ec0 = (uint16_t)SENS_INVAL; s_tu_pred_dl = 0U;
   }
 }
 
@@ -768,9 +931,10 @@ static void dose_task(void *arg)
         int ok = (app_io_ok(PT_PHEC) > 0);
         s_ec = dose_ec_read(ok);
         s_ph = dose_ph_read(ok);
+        sens_track(s_ec, s_ph);
       }
       if ((s_mode == M_AUTO) && !s_flowhold) { dose_topup_poll(); }   /* after the readings above are fresh */
-      else { s_tu_primed = 0U; s_tu_in = 0U; s_tu_owed = 0; s_tu_ep_dl = 0U; }   /* off/hold: water that came in then is not ours to replace */
+      else { s_tu_primed = 0U; s_tu_in = 0U; s_tu_owed = 0; s_tu_ep_dl = 0U; s_tu_carry = 0; s_tu_ec0 = (uint16_t)SENS_INVAL; s_tu_pred_dl = 0U; }   /* off/hold: water that came in then is not ours to replace */
     }
     if (s_mode != M_RELEASE) { pump_assert(); }
     vTaskDelay(pdMS_TO_TICKS(DOSE_TICK_MS));
@@ -926,6 +1090,17 @@ int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap)
     dose_save();
     app_log_event_src("CONFIG", src, "dose tank %luL", v);
   }
+  else if (strcmp(t1, "phdir") == 0)         /* which pH pumps the auto loop may use (2026-09-13) */
+  {
+    uint8_t v8;
+    if (strcmp(t2, "both") == 0)      { v8 = 0U; }
+    else if (strcmp(t2, "base") == 0) { v8 = 1U; }
+    else if (strcmp(t2, "acid") == 0) { v8 = 2U; }
+    else { snprintf(out, cap, "dose phdir both|base|acid (pumps the auto loop may use)"); return 1; }
+    s_ph_dir = v8;
+    dose_save();
+    app_log_event_src("CONFIG", src, "dose phdir %s", (v8 == 0U) ? "both" : ((v8 == 1U) ? "base" : "acid"));
+  }
   else if (strcmp(t1, "learn") == 0)         /* learned model: `dose learn` shows, `dose learn reset` -> factory seeds */
   {
     if (strcmp(t2, "reset") == 0)
@@ -933,13 +1108,16 @@ int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap)
       learn_reset();
       app_log_event_src("CONFIG", src, "dose learn reset to seeds");
     }
-    snprintf(out, cap, "dose learn: gain(x1000/ml) ab=%lu acid=%lu base=%lu drift(x1000/h) ph=%ld ec=%ld ff ph=%ld ec=%ld strikes=%u/%u/%u unlearned=%u/%u last=%u wait=%lus win=%lumin ph%+ld ec%+ld topup=%s owed=%lduS tank=%uL",
+    snprintf(out, cap, "dose learn: gain(x1000/ml) ab=%lu acid=%lu base=%lu (over %ld/%ld/%ldml) drift(x1000/h) ph=%ld ec=%ld ff ph=%ld ec=%ld strikes=%u/%u/%u unlearned=%u/%u last=%u wait=%lus win=%lumin ph%+ld ec%+ld topup=%s owed=%lduS fill=%u.%uL tank=%uL avg ec=%u ph=%u",
              (unsigned long)s_gain[0], (unsigned long)s_gain[1], (unsigned long)s_gain[2],
+             (long)s_lsum_ml[0], (long)s_lsum_ml[1], (long)s_lsum_ml[2],
              (long)s_drift_ph, (long)s_drift_ec, (long)(s_ff_ph / 1000L), (long)(s_ff_ec / 1000L),
              (unsigned)s_strikes[0], (unsigned)s_strikes[1], (unsigned)s_strikes[2],
              (unsigned)s_unlearned[1], (unsigned)s_unlearned[2], (unsigned)s_last.kind,
              (unsigned long)s_wait_s, (unsigned long)(s_acc_t / 60U), (long)(s_acc_dph / 1000L), (long)(s_acc_dec / 1000L),
-             s_tu_in ? "filling" : "idle", (long)(s_tu_owed / 1000L), (unsigned)(s_tank_dl / 10U));
+             s_tu_in ? "filling" : "idle", (long)(s_tu_owed / 1000L),
+             (unsigned)(s_tu_typ_dl / 10U), (unsigned)(s_tu_typ_dl % 10U), (unsigned)(s_tank_dl / 10U),
+             (unsigned)s_ec_avg, (unsigned)s_ph_avg);
     return 1;
   }
   else if (strcmp(t1, "shot") == 0)          /* per-cycle auto shot caps: `dose shot acid|base <ml>` (2026-09-11) */
@@ -964,7 +1142,7 @@ int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap)
     int k = pump_by_name(t1, (int)strlen(t1));
     unsigned long maxml = (k == (int)P_ACID) ? MAN_MAX_ACID_ML : (k == (int)P_BASE) ? MAN_MAX_BASE_ML : MAN_MAX_ML;
     if (k < 0)
-    { snprintf(out, cap, "dose: a|b|acid|base|ab <ml> | stop|auto|off|release | cal|shot|ec|ph|mix|tank|learn|phsrc|phdiv|ecsrc|ecdiv"); return 1; }
+    { snprintf(out, cap, "dose: a|b|acid|base|ab <ml> | stop|auto|off|release | cal|shot|ec|ph|phdir|mix|tank|learn|phsrc|phdiv|ecsrc|ecdiv"); return 1; }
     if (s_mode == M_RELEASE) { snprintf(out, cap, "dose: released — `dose off` first"); return 1; }
     if ((v < 1UL) || (v > maxml)) { snprintf(out, cap, "dose %s <1..%lu ml>", s_pump_name[k], maxml); return 1; }
     if (shot_queue((uint8_t)k, (uint16_t)v, src, "manual") != 0)
@@ -972,13 +1150,14 @@ int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap)
   }
 
   snprintf(out, cap,
-           "dose %s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u today A%lu/B%lu/ac%lu/bs%luml shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
+           "dose %s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u phdir=%s today A%lu/B%lu/ac%lu/bs%luml shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
            mode_name(s_mode), s_flowhold ? "(FLOWHOLD)" : "",
            (s_run >= 0) ? " run:" : "", (s_run >= 0) ? s_pump_name[s_run] : "",
            (unsigned)s_ec, (s_ec_src == 0U) ? "avg" : ((s_ec_src == 1U) ? "1" : "2"), (unsigned)s_ec_div,
            (unsigned)s_ph,
            (s_ph_src == 0U) ? "avg" : ((s_ph_src == 1U) ? "1" : "2"), (unsigned)s_ph_div,
            (unsigned)s_ec_target, (unsigned)s_ec_db, (unsigned)s_ph_target, (unsigned)s_ph_db,
+           (s_ph_dir == 0U) ? "both" : ((s_ph_dir == 1U) ? "base" : "acid"),
            (unsigned long)s_ml_today[P_A], (unsigned long)s_ml_today[P_B],
            (unsigned long)s_ml_today[P_ACID], (unsigned long)s_ml_today[P_BASE],
            (unsigned)s_ec_ml, (unsigned)s_acid_ml, (unsigned)s_base_ml,
