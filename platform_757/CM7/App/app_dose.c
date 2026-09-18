@@ -150,11 +150,13 @@ extern uint32_t app_flow_dl(void);          /* app_user.c: top-up water meter, 0
 #define SEED_DRIFT_EC      (-4000)  /* ~ -100 uS/day uptake = -4 uS/h */
 #define DRIFT_PH_MAX       5000     /* |0.05 pH/h| plausibility clamp */
 #define DRIFT_EC_MAX       50000    /* |50 uS/h| */
-#define LEARN_FORGET_PCT   80U      /* gain = sum(response) / sum(ml) over a forgetting window: every new sample scales the
-                                     * old sums by 80 % (~5 samples of memory). A 15 ml shot (5 uS, +-3 uS noise) and an 80 ml
-                                     * top-up shot (30 uS) enter with their own ml as weight, so big shots dominate and small
-                                     * shots' noise averages out instead of kicking the estimate around (2026-09-15: the
-                                     * per-sample EMA read 531 then 280 /ml from one split fill, sum-ratio gives 378) */
+#define LEARN_WINDOW_ML    250L     /* gain = sum(response) / sum(ml) over a forgetting window measured in EFFECTIVE ml:
+                                     * a sample enters with weight w = expected move / (4 x LEARN_MIN) (capped 1: a 15 ml
+                                     * shot at 5 uS counts ~30 %, an 80 ml top-up shot fully), and the old sums decay by
+                                     * (1 - w x ml / LEARN_WINDOW_ML). Big clean shots dominate, small noisy shots average
+                                     * out. (2026-09-15: the per-sample EMA read 531 then 280 /ml from one split fill;
+                                     * the first sum-ratio cut forgot 20 % PER SAMPLE and two 15 ml shots dragged 354->311) */
+#define LEARN_MIN_KEEP_PCT 50L      /* one sample never forgets more than half of the history */
 #define LEARN_REF_ML_AB    50U      /* the seed / a reloaded gain enter the sums as one sample of this size */
 #define LEARN_REF_ML_PH    5U
 #define DRIFT_ALPHA_PCT    20U      /* drift: 20 % */
@@ -244,9 +246,9 @@ static uint32_t s_gain[3]  = { SEED_GAIN_AB, SEED_GAIN_ACID, SEED_GAIN_BASE };  
 static int32_t  s_drift_ph = SEED_DRIFT_PH, s_drift_ec = SEED_DRIFT_EC;
 static uint8_t  s_strikes[3];             /* no-response counters per gain slot */
 static uint8_t  s_unlearned[3];           /* consecutive auto shots too small to learn from (probe trigger) */
-static int32_t  s_lsum_ml[3]   = { LEARN_REF_ML_AB, LEARN_REF_ML_PH, LEARN_REF_ML_PH };   /* forgetting sums behind s_gain: */
+static int32_t  s_lsum_ml[3]   = { LEARN_REF_ML_AB * 100, LEARN_REF_ML_PH * 100, LEARN_REF_ML_PH * 100 };   /* forgetting sums behind s_gain: */
 static int32_t  s_lsum_resp[3] = { LEARN_REF_ML_AB * SEED_GAIN_AB, LEARN_REF_ML_PH * SEED_GAIN_ACID,
-                                   LEARN_REF_ML_PH * SEED_GAIN_BASE };                     /* ml, and response (fine / 1000 = gain units x ml) */
+                                   LEARN_REF_ML_PH * SEED_GAIN_BASE };                     /* ml x100 (0.01 ml fixed point, 2026-09-18), and response (fine / 1000 = gain units x ml) */
 /* top-up feed-forward state */
 static uint32_t s_tu_last_dl;             /* meter reading at the previous 5 s poll */
 static uint8_t  s_tu_primed, s_tu_in;     /* meter baseline taken / a fill episode is open */
@@ -386,7 +388,7 @@ static void dose_load(void)
 static const uint32_t s_lref[3] = { LEARN_REF_ML_AB, LEARN_REF_ML_PH, LEARN_REF_ML_PH };
 static void learn_seed_sums(uint8_t slot)   /* make the sums agree with s_gain[slot] as one reference-size sample */
 {
-  s_lsum_ml[slot]   = (int32_t)s_lref[slot];
+  s_lsum_ml[slot]   = (int32_t)(s_lref[slot] * 100U);
   s_lsum_resp[slot] = (int32_t)(s_lref[slot] * s_gain[slot]);
 }
 
@@ -432,9 +434,11 @@ static void learn_load(void)
   if ((nf >= 6) && (fill <= 5000U)) { s_tu_typ_dl = (uint16_t)fill; }   /* <= 500 L per fill, else not learned */
   for (uint8_t k = 0; k < 3U; k++)
   {
-    /* sums are trusted only when they reproduce the stored gain; otherwise re-seed from it */
-    if ((nf >= 12) && (sm[k] > 0) && (sm[k] <= 100000L) && (sr[k] > 0) &&
-        ((unsigned long)(sr[k] / sm[k]) >= s_gain[k] * 9U / 10U) && ((unsigned long)(sr[k] / sm[k]) <= s_gain[k] * 11U / 10U))
+    /* sums are trusted only when they reproduce the stored gain; otherwise re-seed from it.
+     * sum_ml is in 0.01 ml since 2026-09-18: a file written by the older ml-unit firmware fails
+     * this check by a factor of 100 and is re-seeded from its gain, which is the intended migration. */
+    if ((nf >= 12) && (sm[k] > 0) && (sm[k] <= 10000000L) && (sr[k] > 0) &&
+        ((unsigned long)(sr[k] * 100L / sm[k]) >= s_gain[k] * 9U / 10U) && ((unsigned long)(sr[k] * 100L / sm[k]) <= s_gain[k] * 11U / 10U))
     { s_lsum_ml[k] = (int32_t)sm[k]; s_lsum_resp[k] = (int32_t)sr[k]; }
     else { learn_seed_sums(k); }
   }
@@ -632,9 +636,21 @@ static void learn_step(uint16_t ec, uint16_t ph)
          * the +-3 uS read noise of small shots averages out instead of stepping the gain */
         uint32_t old = s_gain[slot];
         int32_t  g;
-        s_lsum_ml[slot]   = s_lsum_ml[slot]   * (int32_t)LEARN_FORGET_PCT / 100 + (int32_t)s_last.ml;
-        s_lsum_resp[slot] = s_lsum_resp[slot] * (int32_t)LEARN_FORGET_PCT / 100 + resp;
-        g = (s_lsum_ml[slot] > 0) ? (s_lsum_resp[slot] / s_lsum_ml[slot]) : (int32_t)old;
+        int32_t  w_pct = expect * 100L / (lmin * 4L);                  /* sample weight by expected move: full from 4x LEARN_MIN */
+        int32_t  wml_c, keep_bp;
+        if (w_pct < 10) { w_pct = 10; }
+        if (w_pct > 100) { w_pct = 100; }
+        /* 2026-09-18 fix: the ml sum used to add (ml x w_pct / 100) TRUNCATED to whole ml while the
+         * response sum was added at full precision -> a 5 ml probe at 31 % weight added 1 ml to the
+         * denominator but 1.55 ml worth of response to the numerator, and the gain crept up on every
+         * shot regardless of what was observed (base 888 -> 1024 in six probes that all read ~870).
+         * Both sums are now weighted identically: ml in 0.01 ml fixed point, forgetting in basis points. */
+        wml_c   = (int32_t)s_last.ml * w_pct;                           /* effective ml x100 this sample adds */
+        keep_bp = 10000L - wml_c * 100L / LEARN_WINDOW_ML;              /* forget in proportion to what comes in */
+        if (keep_bp < LEARN_MIN_KEEP_PCT * 100L) { keep_bp = LEARN_MIN_KEEP_PCT * 100L; }
+        s_lsum_ml[slot]   = (int32_t)((int64_t)s_lsum_ml[slot]   * keep_bp / 10000L) + wml_c;
+        s_lsum_resp[slot] = (int32_t)((int64_t)s_lsum_resp[slot] * keep_bp / 10000L) + (int32_t)((int64_t)resp * w_pct / 100L);
+        g = (s_lsum_ml[slot] > 0) ? (int32_t)((int64_t)s_lsum_resp[slot] * 100L / s_lsum_ml[slot]) : (int32_t)old;
         if ((g < (int32_t)(seed / 5U)) || (g > (int32_t)(seed * 5U)))   /* clamped: keep the sums consistent with the clamp */
         {
           g = (g < (int32_t)(seed / 5U)) ? (int32_t)(seed / 5U) : (int32_t)(seed * 5U);
@@ -642,10 +658,10 @@ static void learn_step(uint16_t ec, uint16_t ph)
         }
         s_gain[slot] = (uint32_t)g; s_strikes[slot] = 0; s_unlearned[slot] = 0;
         learn_save();
-        app_log_event("SYSTEM", "dose learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld%s, %ld/ml over %ldml)",
+        app_log_event("SYSTEM", "dose learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld%s, %ld/ml over %ld.%02ldml)",
                       nm, (unsigned long)old, (unsigned long)s_gain[slot], (unsigned)s_last.ml,
                       (long)((s_last.kind == K_EC) ? (d_ec_f / 1000L) : d_ph), s_last.dil ? " net of top-up" : "",
-                      (long)obs, (long)s_lsum_ml[slot]);
+                      (long)obs, (long)(s_lsum_ml[slot] / 100), (long)(s_lsum_ml[slot] % 100));
       }
     }
     s_last.kind = K_IDLE;
@@ -1108,9 +1124,18 @@ int app_dose_cmd(const char *line, const char *src, char *out, uint16_t cap)
       learn_reset();
       app_log_event_src("CONFIG", src, "dose learn reset to seeds");
     }
+    else if (nt == 3)                      /* `dose learn ab|acid|base <x1000/ml>`: operator override, re-seeds that slot's sums (2026-09-15) */
+    {
+      uint8_t  slot = (strcmp(t2, "ab") == 0) ? 0U : (strcmp(t2, "acid") == 0) ? 1U : (strcmp(t2, "base") == 0) ? 2U : 3U;
+      uint32_t seed = (slot == 0U) ? SEED_GAIN_AB : (slot == 1U) ? SEED_GAIN_ACID : SEED_GAIN_BASE;
+      if ((slot > 2U) || (v < seed / 5UL) || (v > seed * 5UL))
+      { snprintf(out, cap, "dose learn ab|acid|base <x1000/ml> (within 1/5..5x of seed) | reset"); return 1; }
+      s_gain[slot] = (uint32_t)v; learn_seed_sums(slot); s_strikes[slot] = 0; learn_save();
+      app_log_event_src("CONFIG", src, "dose learn %s gain set %lu", t2, (unsigned long)v);
+    }
     snprintf(out, cap, "dose learn: gain(x1000/ml) ab=%lu acid=%lu base=%lu (over %ld/%ld/%ldml) drift(x1000/h) ph=%ld ec=%ld ff ph=%ld ec=%ld strikes=%u/%u/%u unlearned=%u/%u last=%u wait=%lus win=%lumin ph%+ld ec%+ld topup=%s owed=%lduS fill=%u.%uL tank=%uL avg ec=%u ph=%u",
              (unsigned long)s_gain[0], (unsigned long)s_gain[1], (unsigned long)s_gain[2],
-             (long)s_lsum_ml[0], (long)s_lsum_ml[1], (long)s_lsum_ml[2],
+             (long)(s_lsum_ml[0] / 100), (long)(s_lsum_ml[1] / 100), (long)(s_lsum_ml[2] / 100),
              (long)s_drift_ph, (long)s_drift_ec, (long)(s_ff_ph / 1000L), (long)(s_ff_ec / 1000L),
              (unsigned)s_strikes[0], (unsigned)s_strikes[1], (unsigned)s_strikes[2],
              (unsigned)s_unlearned[1], (unsigned)s_unlearned[2], (unsigned)s_last.kind,
