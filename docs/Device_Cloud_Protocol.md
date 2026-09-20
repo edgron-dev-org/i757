@@ -252,6 +252,7 @@ Two types, used together:
 
 ---
 - **First implementation [2026-09-04]**: topic `dev/<type>/<sn>/up/event` (QoS0, shares the datalog uplink slot; the board retries on its 10 s tick until sent). Alarm ids `al.gutter1..4.flow` (src `io.g1..4`, val = current L/min) and `al.feed.supply` (all four lines low at once = pump/supply). `state` uses active/clear only; acknowledgement is the on-board command `flow ack` (silences the buzzer, does not change state). The same alarm also lands in the on-board event journal (FAULT) and in the heartbeat bitmap `ga` (point `io.galm`). **Dashboard side**: the event is pushed to open pages over SSE and relayed to a phone (ntfy or Telegram, environment `DASH_NTFY_TOPIC` / `DASH_TG_TOKEN` + `DASH_TG_CHAT`), de-duplicated per id+state for 60 s. Producer = `app_flowmon.c`.
+- **Dosing alarms [2026-09-20]** (producer = `app_dose.c`, same uplink slot, retried on its 5 s tick): `al.dose.ab.cap` / `al.dose.acid.cap` / `al.dose.base.cap` (src `dose`, sev `warn`, val = ml that pump dosed in the last 24 h; active = the rolling 24 h cap is reached and that loop is held while the other loop keeps running, clear = the window freed and the hold lifted by itself) and `al.dose.off` (sev `alarm`; active = a fault dropped automatic dosing to OFF, msg carries the reason such as a pump with no response; clear = the operator re-armed with `dose auto`). Dashboard/phone relay is the same path as the flow alarms, no change needed.
 
 ## 10. Downlink Point-Write set
 
