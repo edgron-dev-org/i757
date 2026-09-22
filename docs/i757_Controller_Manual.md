@@ -149,7 +149,6 @@ Arranged as physically seen **facing the front panel**: **left row = odd positio
 - Each fast DI channel = a two-wire A/B pair (bridge input). ⚠️ **HSDI0 and HSDI1 share the A terminal at position 1; HSDI4 and HSDI5 share the A terminal at position 2** — the signal sources of each shared pair must join on one common wire at that terminal.
 - **485 ports 5 and 6**: A/B at positions 15–18, GND at 19/20.
 - Always follow the silkscreen printed on the board.
-- ⚠️ Field finding (2026-09-03, pending bench verification): pulses fed into left-row terminals 7/9 appear on channel HSDI5 (not HSDI2 as tabled), and pulses on right-row terminals 2/6 make the controller reset repeatedly — **do not use terminals 2/6** until this table has been re-verified pin by pin.
 
 ### 3.9 Grounding & EMC
 
@@ -266,3 +265,4 @@ Customer applications run on the board as FreeRTOS tasks (CM7 or CM4), with a fu
 ## Revision
 
 - v1.0 (2026-08-13): consolidated volume — reorganized from `Hardware_Manual.md` v1.0 + `Installation_and_Wiring.md` v0.1 under the "one manual per board" policy; both superseded volumes retired. Includes the measured P3 / Board 2 pinout tables (2026-08-12) and the new configuration-tier table (§1.1). Open item: external 8-pin feed-through connector part number to be added once finalized.
+- v1.0a (2026-09-22): removed the 2026-09-03 field note at the end of §3.8. The "terminals 2/6 reset" symptom was a firmware bug (fixed); the Board 2 pinout table was re-verified pin by pin against the schematic and both PCB netlists and stands as printed.
