@@ -20,7 +20,8 @@ EX_16DO is a **16-channel isolated digital output** module (PhotoMOS solid-state
 | Power supply | 9–36 V DC wide-range (24 V nominal, via the bus connector) |
 | Communication | RS-485 half-duplex, Modbus RTU slave, 8N1 |
 | Outputs | 16× PhotoMOS solid-state, AC or DC |
-| Per-channel rating | **≤200 mA, ≤60 V loop voltage**; not for switching mains |
+| Per-channel rating | **≤1 A continuous (resistive), 2 A / 100 ms peak, ≤60 V loop voltage**; not for switching mains |
+| Per-group rating | **≤4 A total per group of 8 (COM_A / COM_B)** — the group current flows through the single common terminal |
 | Isolation | Field side isolated from bus/logic side; TVS transient protection per channel |
 | Terminals | 2×9 = 18 positions (row A / row B), one common per group |
 | Indicators | Per-channel output LEDs O1–O16, following output state |
@@ -41,6 +42,8 @@ Wiring notes:
 
 - **Common wiring**: COM to 0 V = low-side switching (sinking); COM to 24 V = high-side switching (sourcing); rows A and B choose independently.
 - Load current stays entirely on the field side (never through the bus connector); **inductive loads (solenoid valves, contactors, locks) require a flyback diode (DC) or RC snubber (AC) at the load**.
+- **Current budget**: 1 A is the per-channel ceiling, not a simultaneous rating — the 8 channels of one group must total ≤4 A (e.g. 4 channels at 1 A, or 8 at 0.5 A); the two groups are budgeted independently.
+- **Typical load checks** (against the 2 A / 100 ms peak): DC-coil contactors and solenoid valves (24 VDC coils, 5–10 W, no inrush) can be driven directly with a flyback diode; **24 VAC-coil contactors are checked by pull-in VA** — up to 48 VA direct, larger ones via an interposing relay; **small motors are checked by starting current** — rated ≤0.5 A (3–5× at start) direct, anything larger or that may stall goes via an interposing relay; loads with capacitive input (LED drivers, DC-DC modules) are checked against the inrush in their datasheet.
 - Channel numbers match the front-panel silkscreen O1–O16.
 - **Switch off the 24 V supply before plugging or unplugging the module** (never under power).
 
@@ -126,4 +129,5 @@ To integrate with any Modbus master (PLC / SCADA / gateway), the minimum set is 
 
 ## Revision
 
+- v1.1 (2026-09-20): output rating revised — per channel 200 mA → **1 A continuous (resistive) / 2 A 100 ms peak**; added **≤4 A per group** and the current-budget note (based on the PhotoMOS datasheet, PCB copper audit and terminal rating).
 - v1.0 (2026-08-13): initial release (per the "one manual per board" policy; template = PH_EC user manual). Sources: former `Installation_and_Wiring.md` §8 (terminal table / common wiring / load rules) + backplane bus contract register usage.
