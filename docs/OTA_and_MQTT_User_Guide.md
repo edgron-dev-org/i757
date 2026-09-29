@@ -52,7 +52,7 @@ The tooling has mTLS built in: `ota_push.ps1 -Public` automatically uses `keys/c
 
 ## 3. The Board's Network Behavior (No Manual Intervention Needed)
 
-1. On power-up it does DHCP first (8 seconds); if it gets nothing it falls back to the static `192.168.137.2/24` (gateway 137.1, see `app_cfg.h`).
+1. On power-up it does DHCP first (8 seconds); if it gets nothing it falls back to a static address: factory default `192.168.137.2/24` (gateway 137.1, `app_cfg.h`), **or whatever was last set with `netcfg`** (persisted on the board, survives reflashing). `netcfg` on the USB console shows the value in force; `netcfg default` restores the factory one. While on the fallback address it retries DHCP every 60 s.
 2. **Automatic broker side-switching**: by default it connects to the public one first; after 2 consecutive failures it automatically switches to the LAN one, and vice versa; a single connection attempt stuck for 20 seconds (no SYN response) is force-aborted and counted as one failure. → It lands on whichever side is alive; if a broker goes down the device finds its own way out.
 3. Half-open connection self-heal: connected but unable to send a heartbeat for 15 seconds → force reconnect (publish watchdog).
 4. Which side it's on now is shown by the heartbeat `bkr` field; the serial (115200) prints `IP READY: <ip> first-broker=<address:port>` at boot.

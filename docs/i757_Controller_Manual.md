@@ -109,7 +109,8 @@ they differ only in three main-board options:
 ### 3.6 Ethernet & USB-C Service Port
 
 - **Ethernet**: 10/100 RJ45 (LAN8742 PHY, RMII); standard cable, Cat-5e or better; use shielded cable in low-voltage trays for long field runs. TLS 1.2 mutual auth; each device has a unique X.509 identity.
-- **USB-C service port**: virtual COM port (CDC, enumerates as a COM port on the PC), full diagnostic CLI (see §7.1); debug / firmware download only, **does not supply power**; located inside the enclosure as a maintenance interface.
+- **USB-C service port**: virtual COM port (CDC, enumerates as a COM port on the PC), full diagnostic CLI (see §7.1); debug / firmware download only, **does not supply power**; a maintenance interface.
+- **SWD debug header**: 3-pin 2.54 mm row under the small left cover, **1 = GND, 2 = SWCLK, 3 = SWDIO** (no reset line: use `reset_config none` in OpenOCD). Probe and flashing notes: §10.
 
 ### 3.7 Main Board P3 Terminal Pinout (3.5 mm, two vertical rows, 2×9 = 18 positions)
 
