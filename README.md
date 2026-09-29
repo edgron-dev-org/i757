@@ -42,10 +42,14 @@ Toolchain: arm-none-eabi-gcc + CMake + Ninja (STM32CubeCLT provides all three).
 
 - **No cloud?** Set `APP_ENABLE_CLOUD 0` in `platform_757/CM7/App/app_cfg.h` for a standalone
   controller (Modbus / I/O / storage / your app tasks, no MQTT). Builds with no broker and no `keys/`.
-- **With cloud:** set `CFG_MQTT_PUB_HOST` in `app_cfg.h` to your MQTT broker, and drop your CA +
-  device certs into a `keys/ca/` directory (kept OUTSIDE this repo; injected at build time; the
-  per-device mTLS private key lives inside the ATECC608A chip). Without `keys/`, the build still
-  succeeds with stub certificates — the cloud just stays offline until you add them.
+- **Edgron cloud (the dashboard):** nothing to configure. `app_cfg.h` already points at the Edgron
+  broker, the Edgron root CA certificate and the release-signing public key are committed in `certs/`
+  (public material, see `certs/README.md`), and the board's own mTLS identity lives in its ATECC608A
+  plus the identity partition written at the factory — it survives any reflash and is never part of
+  a build. Build, flash, and the board appears on the dashboard.
+- **Your own broker:** set `CFG_MQTT_PUB_HOST` in `app_cfg.h` (an IP literal) and put your CA
+  certificate in a `keys/ca/` directory next to the repo (`keys/` wins over `certs/` when present; it
+  is git-ignored). Guide for AWS IoT: `docs/Connect_Your_Own_AWS_IoT.md`.
 
 ## Security note
 

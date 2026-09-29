@@ -203,8 +203,11 @@ This compiles out MQTT, TLS, cloud OTA and SNTP (image ~54 KB smaller). **Everyt
 working**: Modbus master/slave on all 6 front ports, Modbus TCP, backplane modules, USB CLI, RTC
 time, power-fail retention, and your app tasks. Firmware is then flashed over SWD only, and the
 board needs **no broker, no certificates, and no `keys/` folder** to build.
-Leave it at `1` (default) to use the cloud — then set your broker in `app_cfg.h` and drop your own
-CA/device certs into `keys/ca/` (see §5.1 and `OTA_and_MQTT_User_Guide.md`).
+Leave it at `1` (default) to use the cloud. For the Edgron dashboard nothing else is needed:
+`app_cfg.h` already carries the broker address, the trust anchor and the release-signing public key are
+committed in `certs/`, and the board's identity comes from its 608A + identity partition. For your own
+broker set `CFG_MQTT_PUB_HOST` (an IP literal) and put your CA certificate in `keys/ca/` next to the
+repo (overrides `certs/`; see §5.1 and `OTA_and_MQTT_User_Guide.md`).
 
 
 ### 4.6 Putting logic on CM4 (the real-time core)
@@ -571,8 +574,9 @@ Contract: `Inter_Core_RPMsg_Protocol.md` op 0x0D (task table) and op 0x0E (run-t
    cmake --preset Debug          # configure once
    cmake --build build/Debug     # -> build/Debug/platform_757_CM7.elf
    ```
-   No `keys/` folder is needed to build (§4.5). With `APP_ENABLE_CLOUD=1` and no keys you get stub
-   certificates plus a warning — drop your `keys/ca/` in to enable the cloud.
+   No `keys/` folder is needed to build (§4.5): with `APP_ENABLE_CLOUD=1` the configure step reports
+   "using the public certificates in certs/" and the image connects to the Edgron broker. A `keys/ca/`
+   next to the repo (your own CA) overrides it.
 2. **First / development flash**: SWD (OpenOCD). ⚠️ On bank 2, use OTA, not SWD (SWAP trap, see Hardware Manual §9).
 3. **OTA deploy** (recommended, cloud mode): `tools/ota_push.ps1 -Public` pushes both-core images, with
    automatic dual-bank swap + signature verification.

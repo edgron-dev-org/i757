@@ -90,7 +90,7 @@ static const char *p5_fatfs(void)
     static const char cfg[] =
       "# i757 device config (auto-created by firmware)\r\n"
       "sn=0001\r\n"
-      "broker=YOUR_BROKER_HOST:18884\r\n"
+      "broker=114.23.118.29:18884\r\n"
       "# reserved: log=, modbus=, calib=\r\n";
     FRESULT fo = f_open(&f, "i757.cfg", FA_CREATE_ALWAYS | FA_WRITE);
     if (fo == FR_OK)

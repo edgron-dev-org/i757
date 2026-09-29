@@ -73,7 +73,11 @@ on coil 8). To make it yours:
 ## 4. Build
 
 Toolchain: `arm-none-eabi-gcc` + CMake + Ninja (all three come with **STM32CubeCLT**; put its `bin`
-directories on PATH). No `keys/` directory is needed, the build substitutes stub certificates.
+directories on PATH). No `keys/` directory and no broker configuration are needed: `app_cfg.h` already
+points at the Edgron broker and `certs/` (committed, public) holds the broker CA and the release-signing
+public key, so a plain checkout builds a firmware that reaches the Edgron dashboard with the board's
+factory identity. For your own broker set `CFG_MQTT_PUB_HOST` (an IP literal; DNS names are not
+resolved for this setting) and put your CA in a `keys/` directory next to the repo (overrides `certs/`).
 
 ```
 cd platform_757/CM7 && cmake --preset Debug && cmake --build build/Debug    # -> build/Debug/platform_757_CM7.elf

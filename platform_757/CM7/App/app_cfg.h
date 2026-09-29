@@ -27,7 +27,7 @@
 #endif
 
 /* -- Public broker: set to your cloud broker host/IP -- */
-#define CFG_MQTT_PUB_HOST   "YOUR_BROKER_HOST"   /* e.g. "203.0.113.10" or "mqtt.example.com" */
+#define CFG_MQTT_PUB_HOST   "114.23.118.29"   /* e.g. "203.0.113.10" or "mqtt.example.com" */
 #define CFG_MQTT_PUB_PORT   18884                /* mTLS port: device certificate = identity (app_certs) */
 #define CFG_MQTT_PUB_USER   NULL                 /* mTLS: username/password retired (cert CN = username) */
 #define CFG_MQTT_PUB_PASS   NULL

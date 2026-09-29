@@ -23,13 +23,13 @@
 
 | | Public (production form) | LAN (development/debug) |
 |---|---|---|
-| Address:port | `<YOUR_BROKER_HOST>:18884` (your cloud broker, **mTLS**) | `192.168.137.1:1883` (dev PC, plaintext) |
+| Address:port | `114.23.118.29:18884` (Edgron broker, Auckland, **mTLS**; `CFG_MQTT_PUB_HOST`) | `192.168.137.1:1883` (dev PC, plaintext) |
 | Authentication | **Mutual certificates**: the board holds a device certificate (CN=`i757-0001`) and verifies the server certificate | Anonymous (local only) |
 | Server side | mosquitto TLS listener + `require_certificate` + `use_identity_as_username` | mosquitto Windows service |
 
 **Certificate system (self-hosted CA, all ECC P-256, validity 9999 years — "never brick" comes first, security is ensured by rotatability)**:
 - The CA private key `keys/ca/ca.key` = the signing authority (core secret, backed up with the F: drive);
-- The board's three-piece set (CA cert + device cert + device private key) is injected at build time from `keys/ca/` (`app_tls.cmake` generates `app_certs.c`, and **the private key never enters the source tree/git**);
+- The board's trust anchor (CA cert) is injected at build time by `app_tls.cmake` into the generated `app_certs.c`: from `keys/ca/` on an Edgron build machine, else from the committed public copy `certs/ca.crt`. The device certificate lives in the board's identity partition and the private key inside the 608A — **neither is part of a build, nothing private enters the source tree/git**;
 - The trust anchor "follows the deployment": if the customer moves to their own cloud/AWS/Azure, only the CA in `app_certs` is swapped (can be delivered via OTA), and the device identity stays fixed for life.
 - Plaintext port 18883 has been retired; the username/password mechanism is decommissioned. TLS encryption + CRC integrity + certificate authenticity provide triple protection.
 
