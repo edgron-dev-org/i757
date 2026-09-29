@@ -100,7 +100,7 @@ def demo_phec(c, kw, addr):
     fmt = lambda v, div, unit: "invalid" if v == 0x7FFF else "%.2f %s" % (s16(v) / div, unit)
     print("   pH1 =", fmt(g[0], 100, ""), " pH2 =", fmt(g[1], 100, ""))
     print("   EC1 =", "invalid" if g[2] == 0x7FFF else "%d uS/cm" % g[2], " EC2 =", "invalid" if g[3] == 0x7FFF else "%d uS/cm" % g[3])
-    print("   T_pH1 =", fmt(g[4], 10, "C"), " T_pH2 =", fmt(g[5], 10, "C"), " T_EC =", fmt(g[7], 10, "C"))
+    print("   T_pH1 =", fmt(g[4], 10, "C"), " T_pH2 =", fmt(g[5], 10, "C"), " T_EC1 =", fmt(g[6], 10, "C"), " T_EC =", fmt(g[7], 10, "C"))
     print("   (0x7FFF = channel invalid: no probe, out of range, or fault. Poll every 2 s or slower.)")
 
 

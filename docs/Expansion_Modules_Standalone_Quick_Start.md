@@ -80,7 +80,7 @@ addr  3: EX_16DO fw=0x0208 hw=0x0100 uptime=42s crc_err=0 flags=0x0001  [SAFE ST
 addr  4: PH_EC   fw=0x0026 hw=0x0200 uptime=41s crc_err=0 flags=0x0000
    pH1 = invalid  pH2 = invalid
    EC1 = invalid  EC2 = invalid
-   T_pH1 = invalid  T_pH2 = invalid  T_EC = invalid
+   T_pH1 = invalid  T_pH2 = invalid  T_EC1 = invalid  T_EC = invalid
 found 3 module(s) at 9600 baud
 ```
 
@@ -96,6 +96,34 @@ Then exercise each module:
 - **PH_EC**: with probes connected the values appear; `invalid` (raw `0x7FFF`) means no probe, out
   of range or a fault on that channel. Poll every 2 s or slower, the module measures on a 2 s cycle.
 
+## 5bis. Without Python: a serial terminal or a Modbus GUI
+
+**Modbus GUI tools** (QModMaster, Modbus Poll, ModScan, Radzio, …): mode RTU, your COM port, 9600
+8N1, slave ID = DIP + 1, response timeout 300 ms. Then, for example, *read input registers*, start
+address 0, quantity 9 = the identity block. Mind the tool's address convention: enter the addresses
+of this document as they are when the tool says "0-based" (or "PDU address"); add 1, or use the
+30001 / 40001 style, when it counts from 1.
+
+**Raw frames from any serial terminal with a HEX send mode** (SSCOM, XCOM, RealTerm, Docklight,
+Hercules, Termite): 9600 8N1, send as hex, no line ending appended, display as hex. The last two
+bytes of every frame are the CRC-16/MODBUS, low byte first. Ready-made frames for addresses 1, 3
+and 4 (change the first byte and recompute the CRC with any online calculator for another address):
+
+| What | Send (hex) | Reply |
+|---|---|---|
+| Identity, address 1 | `01 04 00 00 00 09 30 0C` | `01 04 12` + 18 data bytes: word 2 = type (1 = 16DO, 2 = PH_EC, 3 = 16DI), word 3 = firmware, words 5–6 = uptime |
+| Identity, address 3 | `03 04 00 00 00 09 31 EE` | same shape |
+| EX-16DI levels, address 1 | `01 02 00 00 00 10 79 C6` | `01 02 02 LL HH crc`, LL bit0 = DI1 … e.g. `01 02 02 01 00 B8 28` = only DI1 closed |
+| EX-16DI counters, address 1 | `01 04 02 00 00 20 F0 6A` | `01 04 40` + 64 bytes: CNT1 = first 4 bytes, high word first |
+| EX-16DO O1 on, address 3 | `03 05 00 00 FF 00 8D D8` | echo of the request. Send it again within 3 s, or the module switches off (safe state) |
+| EX-16DO O1 off, address 3 | `03 05 00 00 00 00 CC 28` | echo |
+| EX-16DO read-back, address 3 | `03 01 00 00 00 10 3C 24` | `03 01 02 LL HH crc` |
+| PH_EC measurements, address 4 | `04 04 01 08 00 08 71 A7` | `04 04 10` + 16 bytes: pH1×100, pH2×100, EC1, EC2, T_pH1×10, T_pH2×10, T_EC1×10, T_EC×10; `7F FF` = invalid |
+| Power-up baud back to 9600, address 1 | `01 06 02 81 00 07 99 98` then `01 06 02 00 A5 5A 73 19` | echo of each; then power-cycle |
+
+A reply whose second byte has bit 7 set (`81`, `84`, …) is an exception; the next byte is the code
+(01 illegal function, 02 illegal address, 03 illegal value). No reply at all: §7.
+
 ## 6. Using your own master (PLC, SCADA, gateway)
 
 What every module answers, with **0-based register addresses as they appear in the frame** (some
@@ -104,7 +132,7 @@ tools display them +1, or as 30001/40001-style numbers; check your tool's conven
 | | EX-16DI (type 3) | EX-16DO (type 1) | PH_EC (type 2) |
 |---|---|---|---|
 | Identity | FC04 `0x0000`–`0x0008`: `0x0001` type, `0x0002` firmware, `0x0008` hardware, `0x0004/5` uptime, `0x0006` CRC-error count, `0x0007` status (bit0 safe state) | same | same |
-| Data | FC02 inputs 0–15 (levels); FC04 `0x0200`–`0x021F` 16 × u32 counters, high word first | FC01 coils 0–15 read-back; FC05/FC15 write coils 0–15; or holding `0x0203` = all 16 as one word | FC04 `0x0108`–`0x010F`: pH1, pH2 (×100), EC1, EC2 (µS/cm at 25 °C), T_pH1, T_pH2, (T_EC1 unused), T_EC (×10 °C); `0x7FFF` = invalid |
+| Data | FC02 inputs 0–15 (levels); FC04 `0x0200`–`0x021F` 16 × u32 counters, high word first | FC01 coils 0–15 read-back; FC05/FC15 write coils 0–15; or holding `0x0203` = all 16 as one word | FC04 `0x0108`–`0x010F`: pH1, pH2 (×100), EC1, EC2 (µS/cm at 25 °C), T_pH1, T_pH2, T_EC1 (optional row-2 probe), T_EC (×10 °C); `0x7FFF` = invalid |
 | Configuration | holding `0x0020`–`0x002F` debounce ms; `0x0030` counter clear bitmap | — | `0x0200` area: probe type, calibration, compensation source (manual §6) |
 | Persist | write `0xA55A` to `0x0200` | write `0xA55A` to `0x0200` | write `0xA55A` to `0x0200` |
 | Baud | `0x0281` power-up code (+ persist) | same | same |

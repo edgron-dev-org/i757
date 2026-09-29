@@ -6,7 +6,7 @@
 
 ## 1. Product Overview
 
-The PH_EC is a **2-channel pH + 2-channel conductivity (EC) + 3-channel temperature** water-quality transmitter. It connects to any Modbus master (PLC / gateway / industrial PC) over **RS-485 (Modbus RTU slave)**, and can also be used as a backplane expansion module of the Edgron i757 controller.
+The PH_EC is a **2-channel pH + 2-channel conductivity (EC) + 4-channel temperature** water-quality transmitter. It connects to any Modbus master (PLC / gateway / industrial PC) over **RS-485 (Modbus RTU slave)**, and can also be used as a backplane expansion module of the Edgron i757 controller. Power and the RS-485 bus reach the module over the backplane feed-through: from the controller inside an i757, or from an **EX_BUS bus access board** when the module is used on its own (`Expansion_Modules_Standalone_Quick_Start.md`).
 
 - Every channel is calibrated independently; calibration parameters survive power cycles;
 - Measurements are published directly in engineering units (pH × 100, µS/cm, °C × 10) — the master needs no conversion formulas;
@@ -18,11 +18,11 @@ The PH_EC is a **2-channel pH + 2-channel conductivity (EC) + 3-channel temperat
 
 | Item | Value |
 |---|---|
-| Power supply | 9–36 V DC wide-range (24 V nominal) |
-| Communication | RS-485 half-duplex, Modbus RTU slave, 8N1 |
+| Power supply | 9–36 V DC wide-range (24 V nominal), via the backplane feed-through (i757 slot or EX_BUS board); **no power terminals on the module** |
+| Communication | RS-485 half-duplex, Modbus RTU slave, 8N1, via the backplane feed-through (i757 or EX_BUS); **no bus terminals on the module** |
 | pH | 2 channels, 0–14 pH, resolution 0.01 pH; two-point calibration, typical accuracy ±0.05 pH after calibration (electrode-dependent) |
 | EC | 2 channels, 0.025–10 mS/cm, resolution 1 µS/cm; ±1.5% across the range after standard-solution calibration; auto-compensated to 25 °C |
-| Temperature | 3 channels, PT100 (default) / PT1000 / NTC configurable, resolution 0.1 °C |
+| Temperature | 4 channels (pH1, pH2, EC1 optional, EC shared), PT100 (default) / PT1000 / NTC configurable, resolution 0.1 °C |
 | Probe interface | 2-wire; pH = measuring + reference electrode, EC = electrode pair (interchangeable), temperature = sense + return |
 | Indicators | Run LED 1 Hz heartbeat; channel LEDs solid = OK, 2 Hz blink = probe fault |
 
@@ -32,8 +32,8 @@ The terminal block has 9 rows × 2 positions (A left / B right), arranged from t
 
 | Row | A                       | B                       | Notes                                             |
 |-----|-------------------------|-------------------------|---------------------------------------------------|
-| 1   | 24V                     | 0V                      | Power                                             |
-| 2   | 485_A                   | 485_B                   | RS-485 bus                                        |
+| 1   | —                       | —                       | Not connected (reserved)                          |
+| 2   | Temp EC1                | GND                     | Dedicated compensation for EC1, optional: without a probe here EC1 borrows the shared EC temperature of row 4 |
 | 3   | EC1 electrode           | EC1 electrode           | Wires interchangeable                             |
 | 4   | Temp EC (shared)        | GND                     | Shared water temperature for EC1/EC2 compensation |
 | 5   | EC2 electrode           | EC2 electrode           | Wires interchangeable                             |
@@ -44,6 +44,7 @@ The terminal block has 9 rows × 2 positions (A left / B right), arranged from t
 
 Wiring notes:
 
+- **Power and RS-485 do not come through this terminal block.** The module is fed and addressed over the backplane feed-through: inside an i757 from the controller, on its own from an EX_BUS bus access board (`Expansion_Modules_Standalone_Quick_Start.md`);
 - **Do not ground the solution**: the measurement side is galvanically floating by design; with a 3-wire pH probe, leave the third (solution-ground) wire unconnected;
 - Connect the probe cable shield to the module-side GND terminal at **one end only** (verify the shield is open-circuit to the cores first);
 - The pH measuring (glass) and reference electrodes must not be swapped; EC pairs and temperature probes have no polarity;
@@ -100,8 +101,8 @@ Baud-rate code table (shared by both registers):
 | 0x010B | EC2 | same | uint16 |
 | 0x010C | Temp PH1 | °C × 10 | int16 |
 | 0x010D | Temp PH2 | °C × 10 | int16 |
-| 0x010E | Temp EC1 (not brought out on this model; always reads 0x7FFF) | °C × 10 | int16 |
-| 0x010F | Temp EC2 (= the shared EC water-temperature terminal) | °C × 10 | int16 |
+| 0x010E | Temp EC1 (row 2, optional dedicated EC1 probe; 0x7FFF when none is fitted) | °C × 10 | int16 |
+| 0x010F | Temp EC2 (= the shared EC water-temperature terminal, row 4) | °C × 10 | int16 |
 
 - **Invalid marker 0x7FFF**: a faulted or disconnected channel publishes 0x7FFF — never a stale or fabricated number. A fault is declared only after 3 s of consecutive invalid readings (configurable, §6.6); recovery is immediate;
 - Published values are smoothed (median + damping, default 2 s, configurable); the unfiltered instantaneous values are available at 0x0290–0x0297 (FC03) for diagnostics;
@@ -111,7 +112,7 @@ Baud-rate code table (shared by both registers):
 
 **General rule**: writes take effect immediately but are not persisted; writing **0xA55A to 0x0200 saves to flash** (survives power cycles). Writing 0x0F0F restores factory defaults (RAM only; save again to persist). Status register 0x0201: bit0 = unsaved changes, bit1 = valid flash copy exists, bit2 = last save succeeded.
 
-### 6.1 Temperature Channels (n = 0,1 → PH1/PH2 at base 0x0210 + 8n; shared EC channel at base 0x0228)
+### 6.1 Temperature Channels (n = 0..3 → PH1 / PH2 / EC1 / EC shared, base 0x0210 + 8n; the shared EC channel is n = 3 at 0x0228)
 
 | Offset | Name | Description |
 |---|---|---|
@@ -218,7 +219,7 @@ Notes:
 
 Integration with any Modbus master (PLC / SCADA / gateway) takes three steps:
 
-1. Set the DIP address and configure the serial port per 4.1 (9600, 8N1 out of the box);
+1. Set the DIP address and configure the serial port per 4.1 (9600, 8N1 out of the box); power and bus arrive over the backplane — on its own the module needs an EX_BUS board (`Expansion_Modules_Standalone_Quick_Start.md`);
 2. Cyclically read 8 registers starting at FC04 0x0108 = all measurements (a period of ≥ 2 s is recommended — it matches the module's measurement cycle; polling faster adds nothing);
 3. Treat 0x7FFF as "channel invalid"; optionally poll 0x0010 for fault events.
 
