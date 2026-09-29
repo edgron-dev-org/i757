@@ -59,7 +59,7 @@ Wiring notes:
 Mounting:
 
 - **As an i757 expansion module**: plug into an internal blade slot, or stack side-mounted via the backplane feed-through — power and bus connect automatically, zero wiring.
-- **Stand-alone**: wire 24 V and the RS-485 bus (A/B) to the corresponding positions of the side bus connector (see the wiring sheet shipped with the unit / silkscreen).
+- **Stand-alone** (no i757): the module has no power or bus terminals of its own — stack it with an **EX_BUS bus access board**, which brings 24 V, PE and the RS-485 pair in on its front terminals and along the row through the backplane feed-through. Step by step: `Expansion_Modules_Standalone_Quick_Start.md`.
 - **Slave address**: 4-position DIP switch on the module, **address = DIP value + 1** (0000 = address 1 … 1111 = address 16); addresses must be unique on a bus.
 
 ## 4. Modbus Communication

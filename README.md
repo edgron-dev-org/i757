@@ -23,6 +23,8 @@ tools/               OTA push / broker setup scripts
 0. **Just received a board?** — `docs/Unboxing_and_First_Power_Up.md` (power, USB console, network,
    dashboard, and the things a fresh board does that are not faults). Working with an AI coding
    assistant? `CLAUDE.md` at the repo root is the fast path into the code.
+0b. **Using expansion modules without the controller** (plain Modbus slaves for your PLC/PC) —
+   `docs/Expansion_Modules_Standalone_Quick_Start.md` + `tools/u485_quickstart.py`.
 1. **Hardware & installation** — `docs/i757_Controller_Manual.md` (controller: specs, wiring, operation);
    expansion modules have their own manuals: `docs/EX_16DO_Module_Manual.md`, `docs/PH_EC_Transmitter_User_Manual.md`
 2. **Software / how to develop your app** — `docs/Software_Manual_Application_Development.md`
