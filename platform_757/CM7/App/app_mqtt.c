@@ -729,6 +729,28 @@ void mqtt_broker_select(uint8_t idx)  /* ota_cmd (tcpip thread): broker-pub/lan/
 
 /* ---- application main loop (defaultTask context; LwIP already init'd by main.c generated code) ----
  * green LED 1Hz + dual-core ping-pong + DHCP static fallback + MQTT heartbeat/watchdog + OTA consume + console diagnostics */
+/* ---- main-loop tick integrity probe (2026-09-25) ----
+ * The loop counter `tick` lives in a callee-saved register (r4). Heartbeat archaeology found it
+ * overwritten about once a day on the greenhouse board since Aug 23 (26 events, every one a
+ * 16-bit-wide change, both directions, boot/RTC/publish counters continuous). A backward jump
+ * used to freeze the reconnect gate for hours (08-25 four-hour mute, every "cloud mute 30min"
+ * self reset). The gate now runs on kernel time; this probe keeps a shadow copy in a static and
+ * reports the loop stage in which the register came back wrong, so the writer can be cornered
+ * from the field without SWD. Repairs the value on the spot. */
+static uint32_t s_tick_shadow = 0;
+static uint16_t s_tick_corrupt = 0;
+static void tick_corrupt_report(uint8_t stage, uint32_t bad, uint32_t good)
+{
+  extern void app_log_event_src(const char *type, const char *src, const char *fmt, ...);
+  s_tick_corrupt++;
+  printf("[CM7] TICK CORRUPT #%u stage=%u good=%lu bad=%lu\n\r", (unsigned)s_tick_corrupt,
+         (unsigned)stage, (unsigned long)good, (unsigned long)bad);
+  app_log_event_src("SYSTEM", "sys", "tick corrupt #%u st%u good=%lu bad=%lu d=%ld lo=%04x cmd=%.20s",
+                    (unsigned)s_tick_corrupt, (unsigned)stage, (unsigned long)good, (unsigned long)bad,
+                    (long)((int32_t)(bad - good)), (unsigned)(bad & 0xFFFFU), s_mbreg_cmd);
+}
+#define TICK_CHECK(stage) do { if (tick != s_tick_shadow) { tick_corrupt_report((stage), tick, s_tick_shadow); tick = s_tick_shadow; } } while (0)
+
 void mqtt_app_task(void)
 {
   extern struct netif gnetif;
@@ -783,8 +805,10 @@ void mqtt_app_task(void)
   uint32_t conn_start = 0;
   uint32_t wd_last_pub = 0, wd_stale = 0;
   { extern void app_user_init(void); app_user_init(); }   /* YOUR application: create your FreeRTOS tasks here (app_user.c) */
+  s_tick_shadow = 0;
   for(;;)
   {
+    TICK_CHECK(0);   /* stage 0 = previous iteration's printf + osDelay (context switches) */
     { static uint8_t p5done = 0;                              /* 757: storage triple boot self-test once */
       if (!p5done) { extern void app_p5_test_run(void); app_p5_test_run(); p5done = 1U;
                      extern void app_pf_init(void); app_pf_init(); } }   /* power-fail detection armed (after QSPI) */
@@ -802,11 +826,13 @@ void mqtt_app_task(void)
     { extern void app_mbcfg_poll(void); app_mbcfg_poll(); }   /* Modbus ports: first load / cloud queue / TCP service (contract §2/§5) */
     { extern void app_pf_poll(void); app_pf_poll(); }         /* power-fail black box: background pre-erase of the next slot (app_pwrfail.h) */
     { extern void app_datalog_poll(void); app_datalog_poll(); }   /* data recorder + event journal (Data_Logging_and_Event_Journal.md) */
+    TICK_CHECK(1);   /* stage 1 = LED/CLI/RPMsg pump/Modbus ports/power-fail/datalog poll */
 #if APP_ENABLE_CLOUD
     if (s_mqtt_up && (s_desc_pub_err != 0)) { tcpip_callback(mqtt_desc_republish_cb, NULL); }   /* desc first publish ring-full failure = resend until success (dash gets new sn/name) */
 #endif
     if ((tick % 20U) == 6U) { app_mb_time_push(); }   /* every 10s feed time to M4 -> broadcast onto the bus */
     if ((tick % 10U) == 4U) { app_rpc_hb(); }         /* every 5s RPMsg heartbeat (CM4 alive criterion) */
+    TICK_CHECK(2);   /* stage 2 = desc republish / time push / RPMsg heartbeat */
     if (!ip_shown && (ip4_addr_get_u32(netif_ip4_addr(&gnetif)) != 0U))
     {
       printf("[CM7] IP READY: %s (broker=%s)\n\r", ip4addr_ntoa(netif_ip4_addr(&gnetif)),
@@ -830,20 +856,24 @@ void mqtt_app_task(void)
 #if APP_ENABLE_CLOUD
     /* MQTT: has IP and not connected -> try connecting to broker every 10s; connected -> send one status every 5s */
 #ifndef OTA_TEST_NONET   /* verification matrix #5: once defined, never initiate a connection, simulating "new firmware broke the network stack" -> trial-period timeout rollback */
-    if (ip_shown && !s_mqtt_up && !s_mqtt_connecting && (tick >= mqtt_retry_at))
+    /* Retry/abort timers on kernel time (2026-09-25): the loop counter `tick` is the variable the
+     * stack-slot corruption hits; a backward jump left this gate shut for up to 4.5 h (08-25 mute,
+     * every rung-3 self reset). Kernel milliseconds cannot be reached from a task stack. */
+    if (ip_shown && !s_mqtt_up && !s_mqtt_connecting && ((int32_t)(osKernelGetTickCount() - mqtt_retry_at) >= 0))
     {
       s_mqtt_connecting = 1;
-      conn_start = tick;
-      mqtt_retry_at = tick + 20U;
+      conn_start = osKernelGetTickCount();
+      mqtt_retry_at = conn_start + 10000U;
       tcpip_callback(mqtt_connect_cb, NULL);
     }
 #endif
     /* connect attempt undecided after 20s (SYN black hole must wait for TCP slow timeout) -> abort, count a failure to allow switching sides */
-    if (!s_mqtt_up && s_mqtt_connecting && ((tick - conn_start) >= 40U))
+    if (!s_mqtt_up && s_mqtt_connecting && ((osKernelGetTickCount() - conn_start) >= 20000U))
     {
       tcpip_callback(mqtt_conn_abort_cb, NULL);
     }
 #endif
+    TICK_CHECK(3);   /* stage 3 = IP-ready / SNTP print / MQTT connect gate */
     ota_poll();
     if (s_mbreg_pend)                          /* deferred mbr/mbw/datalog cmd from the MQTT downlink */
     {
@@ -902,6 +932,7 @@ void mqtt_app_task(void)
       s_mbreg_pend = 0;
       s_status_dirty = 1;                      /* result rides the next heartbeat ("cmdr") */
     }
+    TICK_CHECK(4);   /* stage 4 = ota_poll + deferred cloud commands (mbr/mbw/dose/vent/flow/hsdi/netcfg/datalog) */
     if (s_reboot_cnt != 0U)                    /* cloud "reboot", deferred past the QoS1 PUBACK (see downlink handler) */
     {
       if (s_reboot_cnt == 5U)                  /* first beat: journal while later beats can still flush it to disk */
@@ -993,6 +1024,7 @@ void mqtt_app_task(void)
                mtsk_str, mdata_str); } }
       tcpip_callback(mqtt_pub_cb, NULL);
     }
+    TICK_CHECK(5);   /* stage 5 = reboot deferral + report-on-change + status publish (diag/desc/snprintf) */
     /* publish watchdog: only at periodic points (every 5s) evaluate whether pub_ok has stalled (half-open TCP) -> force reconnect.
      * Independent of the "report-on-change" above, so on-change publishes don't disturb the stale count. */
     if (s_mqtt_up && ((tick % 10U) == 0U))
@@ -1042,6 +1074,7 @@ void mqtt_app_task(void)
         tcpip_callback(mqtt_force_reconnect_cb, NULL);
       }
     }
+    TICK_CHECK(6);   /* stage 6 = publish watchdog / wda autopsy */
     /* offline autopsy (observation only): cloud down for 120s straight despite the 10s retry
      * cadence -> photograph the client + both allocators, touch NOTHING. The 2026-07-24 recovery
      * watchdog that used to live here (client rebuild / TLS-pool reset) was withdrawn same day:
@@ -1123,6 +1156,7 @@ void mqtt_app_task(void)
       }
     }
 #endif
+    TICK_CHECK(7);   /* stage 7 = offline autopsy + heal ladder */
     /* ~8s without a lease -> fall back to static (addresses in app_cfg.h) */
     if (!ip_shown && (tick == 16U))
     {
@@ -1168,6 +1202,7 @@ void mqtt_app_task(void)
 #if APP_ENABLE_CLOUD
     mqtt_dhcp_bound_check();
 #endif
+    TICK_CHECK(8);   /* stage 8 = DHCP fallback / link retry / netcfg / dhcp_bound_check */
     if ((tick & 1U) == 0U)
     {
       extern volatile uint32_t eth_irq_count;
@@ -1182,6 +1217,7 @@ void mqtt_app_task(void)
              (unsigned int)xPortGetFreeHeapSize());
     }
     tick++;
+    s_tick_shadow = tick;
     osDelay(500);
   }
 }

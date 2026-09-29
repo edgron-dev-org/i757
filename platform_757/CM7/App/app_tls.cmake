@@ -12,14 +12,23 @@ list(REMOVE_ITEM MBEDTLS_SRC
 set(ALTCP_TLS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/Third_Party/LwIP/src/apps/altcp_tls)
 
 # certificate generation: PEM -> C string literal
-# keys/ lives outside the repo (private keys are never committed). When it is absent,
-# emit empty stub certificates so a customer with no keys can still build:
-#   - APP_ENABLE_CLOUD=0 (app_cfg.h): standalone controller, needs no certificates
-#   - APP_ENABLE_CLOUD=1 without keys: compiles; the cloud connection fails gracefully
-#     (altcp returns NULL); add keys/ca/ to enable it.
-set(KEYS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/ca)
+# Two sources:
+#   keys/   — OUTSIDE the repo (../../../keys, never committed): private material and the
+#             operator's per-board certificates. Present on Edgron build machines only.
+#   certs/  — INSIDE the repo (../../certs, committed, nothing secret): the Edgron root CA
+#             certificate and the Edgron firmware-signing PUBLIC key. A plain checkout with no
+#             keys/ builds a firmware that connects to the Edgron broker with the board's factory
+#             identity (608A + identity partition) and accepts Edgron-signed releases.
+# keys/ wins when both exist. Anything found in neither becomes an empty stub (the build still
+# succeeds; that feature is inert). APP_ENABLE_CLOUD=0 (app_cfg.h) needs none of this.
+set(KEYS_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/ca)
+set(CERTS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../certs)
 if(NOT EXISTS ${KEYS_DIR}/ca.crt)
-    message(WARNING "keys/ not found -> building with STUB certificates. Cloud/anti-clone are inert until you add keys/ca/. For a standalone controller set APP_ENABLE_CLOUD=0 in App/app_cfg.h.")
+    if(EXISTS ${CERTS_DIR}/ca.crt)
+        message(STATUS "keys/ not found -> using the public certificates in certs/ (Edgron broker CA + release signing key). Anti-clone provisioning material is absent (inert).")
+    else()
+        message(WARNING "neither keys/ nor certs/ found -> building with STUB certificates: the cloud stays offline. For a standalone controller set APP_ENABLE_CLOUD=0 in App/app_cfg.h.")
+    endif()
 endif()
 function(pem_to_c INFILE OUTVAR)
     if(EXISTS ${INFILE})
@@ -27,10 +36,19 @@ function(pem_to_c INFILE OUTVAR)
         string(REPLACE "\n" "\\n\"\n\"" _pem "${_pem}")
         set(${OUTVAR} "\"${_pem}\"" PARENT_SCOPE)
     else()
-        set(${OUTVAR} "\"\"" PARENT_SCOPE)   # stub: empty PEM when the key file is absent
+        set(${OUTVAR} "\"\"" PARENT_SCOPE)   # stub: empty PEM when the file is absent
     endif()
 endfunction()
-pem_to_c(${KEYS_DIR}/ca.crt          CA_PEM_C)
+# first existing file wins: the private keys/ copy, else the committed public copy in certs/
+function(pem_to_c_first OUTVAR PRIVATE_FILE PUBLIC_FILE)
+    if(EXISTS ${PRIVATE_FILE})
+        pem_to_c(${PRIVATE_FILE} _v)
+    else()
+        pem_to_c(${PUBLIC_FILE} _v)
+    endif()
+    set(${OUTVAR} "${_v}" PARENT_SCOPE)
+endfunction()
+pem_to_c_first(CA_PEM_C ${KEYS_DIR}/ca.crt ${CERTS_DIR}/ca.crt)
 pem_to_c(${KEYS_DIR}/device-608a.crt DEVCERT_PEM_C)   # tls-608a: device cert = 608A public key (CA-signed); private key in chip
 # Placeholder private key — ALWAYS the throwaway below, never a real key. altcp's
 # 2wayauth config just needs SOME parsable P-256 key (mbedTLS 2.16 doesn't check the
@@ -47,7 +65,7 @@ if(DEFINED APP_IDENTITY_EMBED AND NOT APP_IDENTITY_EMBED)
     set(DEVCERT_PEM_C "\"\"")
     message(STATUS "APP_IDENTITY_EMBED=0: universal image, device identity from littlefs only")
 endif()
-pem_to_c(${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/fwsign/fwsign.pub FWSIGN_PUB_C)
+pem_to_c_first(FWSIGN_PUB_C ${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/fwsign/fwsign.pub ${CERTS_DIR}/fwsign.pub)
 pem_to_c(${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/anticlone/dev_se.pub ANTICLONE_PUB_C)
 pem_to_c(${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/anticlone/dev_se.key SE_DEV_KEY_C)
 pem_to_c(${CMAKE_CURRENT_SOURCE_DIR}/../../../keys/aws/AmazonRootCA1.pem AWS_CA_C)
