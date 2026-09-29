@@ -193,6 +193,6 @@ Every cloud command (`dev/I757-M/<sn>/dn/cmd`, plain text) also works verbatim o
 | Module not on the dashboard | `mbus` → `online=`; DIP address = value + 1; unique per bus. |
 | SWD flash "did nothing" | Running on bank 2 (§5). |
 | Beeps every 10 s | Greenhouse flow monitor still initialised (§3). `flow off`. |
-| Ping to 192.168.137.2 fails on a direct cable | The fallback address may have been changed: `netcfg`. Unboxing guide §4.2. |
+| Ping to 192.168.1.250 fails on a direct cable | The fallback address may have been changed: `netcfg`. Unboxing guide §4.2. |
 
 Questions and bugs: GitHub issues on this repository.

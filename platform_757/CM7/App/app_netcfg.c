@@ -3,8 +3,9 @@
 /* app_netcfg.c — runtime static-fallback network config (2026-08-31).
  *
  * Born from a field case: a rebooted board missed its DHCP window, fell back to the
- * COMPILED-IN 192.168.137.2 (an artifact of the old PC-ICS bench network) on a
- * 192.168.1.x site, and sat unreachable — zero SYNs — until someone walked over.
+ * compiled-in address of the day (192.168.137.2, an artifact of the old PC-ICS bench
+ * network; the default is 192.168.1.250 since 2026-09-29) on a 192.168.1.x site, and
+ * sat unreachable — zero SYNs — until someone walked over.
  * DHCP stays the preferred path; this module only replaces the compile-time
  * CFG_STATIC_* literals with a littlefs-backed value the field can set over the
  * USB console or a cloud command, so one universal image fits every site.

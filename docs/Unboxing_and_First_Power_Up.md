@@ -82,13 +82,14 @@ This is fine for a console-only test, but there is no Internet on that cable, so
 come up and the dashboard will stay offline. What happens:
 
 1. The board waits **8 s** for DHCP, then falls back to a **static address**.
-2. The factory default is `192.168.137.2/24` (gateway `.1`), **but it can have been changed on the
+2. The factory default is `192.168.1.250/24` (gateway `192.168.1.1`), **but it can have been changed on the
    bench** with `netcfg`. Always read the real value from the console before you ping:
    ```
    > netcfg
    fallback 192.168.1.250 255.255.255.0 gw=192.168.1.1 dns=192.168.1.1 (net.cfg); current ip=192.168.1.250
    ```
-   `(builtin)` instead of `(net.cfg)` means the compile-time default is in force.
+   `(builtin)` instead of `(net.cfg)` means the compile-time default is in force (the example above
+   happens to equal the factory default).
 3. Give the laptop an address in the same subnet (e.g. `192.168.1.10/24` for the example above)
    and ping the board's address. If you want the factory default back: `netcfg default`.
 4. While on the fallback address the board retries DHCP every 60 s and switches over automatically

@@ -39,7 +39,7 @@
 /* -- (Optional) AWS IoT Core broker: domain access, needs DNS+SNI, trust anchor = Amazon Root CA 1 -- */
 #define CFG_MQTT_AWS_HOST   "YOUR_AWS_IOT_ENDPOINT"  /* e.g. "xxxxxxxx-ats.iot.<region>.amazonaws.com" */
 #define CFG_MQTT_AWS_PORT   8883
-#define CFG_DNS_SERVER      "192.168.137.1"          /* DNS proxy; used to resolve the AWS domain */
+#define CFG_DNS_SERVER      "192.168.1.1"            /* DNS used while on the static fallback (resolves the AWS domain); DHCP supplies its own */
 
 /* -- Preferred (home) broker: selected at boot, and the side the auto-fallback
  * returns to after another broker fails repeatedly (see broker_fail, app_mqtt.c).
@@ -57,10 +57,11 @@
  * certificate with `id2-cert` — see docs/Connect_Your_Own_AWS_IoT.md. Valid: 1..7. */
 #define CFG_SE_CUSTOMER_SLOT 2
 
-/* -- Static IP fallback on DHCP timeout (match your network) -- */
-#define CFG_STATIC_IP       "192.168.137.2"
+/* -- Static IP fallback on DHCP timeout (compile-time default; per-site override = `netcfg`, app_netcfg.c) --
+ * 192.168.1.250/24 since 2026-09-29: the common home/site router subnet. Was 192.168.137.2 (PC-ICS bench artifact). */
+#define CFG_STATIC_IP       "192.168.1.250"
 #define CFG_STATIC_MASK     "255.255.255.0"
-#define CFG_STATIC_GW       "192.168.137.1"
+#define CFG_STATIC_GW       "192.168.1.1"
 
 /* -- MQTT topics: per-device namespace (Device Cloud Protocol §3) --
  * Topics are built at runtime as dev/<type>/<sn>/... where <sn> = the CN of the
