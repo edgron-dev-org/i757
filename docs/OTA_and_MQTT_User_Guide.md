@@ -54,7 +54,7 @@ The tooling has mTLS built in: `ota_push.ps1 -Public` automatically uses `keys/c
 
 1. On power-up it does DHCP first (8 seconds); if it gets nothing it falls back to a static address: factory default `192.168.1.250/24` (gateway 192.168.1.1; `app_cfg.h`), **or whatever was last set with `netcfg`** (persisted on the board, survives reflashing). `netcfg` on the USB console shows the value in force; `netcfg default` restores the factory one. While on the fallback address it retries DHCP every 60 s.
 2. **Automatic broker side-switching**: by default it connects to the public one first; after 2 consecutive failures it automatically switches to the LAN one, and vice versa; a single connection attempt stuck for 20 seconds (no SYN response) is force-aborted and counted as one failure. → It lands on whichever side is alive; if a broker goes down the device finds its own way out.
-3. Half-open connection self-heal: connected but unable to send a heartbeat for 15 seconds → force reconnect (publish watchdog).
+3. Half-open connection self-heal: connected but unable to send a heartbeat for 45 seconds → force reconnect (publish watchdog; two gentle TCP kicks at 5 s and 10 s first. Was 15 seconds before 2026-10-09).
 4. Which side it's on now is shown by the heartbeat `bkr` field; the serial (115200) prints `IP READY: <ip> first-broker=<address:port>` at boot.
 
 ## 4. MQTT Topic Overview (per-device namespace, since 2026-07-24)
@@ -233,7 +233,7 @@ When a site has neither internet nor LAN, the USB-C service port doubles as the 
 | No heartbeat on the public network | sub from the LAN for a moment | The board landed on the lan side, send `broker-pub` |
 | No heartbeat on either side | Serial `serial_watch.ps1` | Cable/power/firmware died, the serial has the truth |
 | `verify-fail` | Re-run the push | Dropped block, an idempotent re-push round usually clears it |
-| Heartbeat slow after swap | Wait 90s | Half-open connection, the watchdog self-heals + reconnects in 15s |
+| Heartbeat slow after swap | Wait 90s | Half-open connection, the watchdog self-heals + reconnects in 45s |
 | Serial won't open | Who's holding COM6 | serial_watch and the automation tool are mutually exclusive, close one |
 | mosquitto_pub reports not authorised | -u/-P parameters | On the public net you forgot the account / wrong password |
 | Board doesn't react to apply/revert | Heartbeat `evt` field (refused:*) | The spare bank was touched but not verified, the brick-proof gate rejected it — swap after a complete push |

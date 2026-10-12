@@ -104,7 +104,21 @@ def demo_phec(c, kw, addr):
     print("   (0x7FFF = channel invalid: no probe, out of range, or fault. Poll every 2 s or slower.)")
 
 
-DEMO = {1: demo_16do, 2: demo_phec, 3: demo_16di}
+def demo_8ai(c, kw, addr):
+    r = c.read_input_registers(0x0100, count=17, **{kw: addr})
+    t = c.read_holding_registers(0x0210, count=8, **{kw: addr})
+    if r.isError() or t.isError():
+        print("   read failed:", r if r.isError() else t); return
+    g, types = r.registers, t.registers
+    name = {0: "0-10V", 1: "4-20mA", 2: "0-20mA", 3: "0-5V"}
+    for i in range(8):
+        eng = ("%.2f mA" % (g[8 + i] / 100.0)) if types[i] in (1, 2) else ("%.3f V" % (g[8 + i] / 1000.0))
+        print("   ch%d [%s] = %s%s  (node %d mV)" % (i + 1, name.get(types[i], "?"), eng,
+              "  FAULT" if (g[16] >> i) & 1 else "", g[i]))
+    print("   (range per channel = holding 0x0210+k-1, must match the DIP switch; FAULT = open loop / over-range)")
+
+
+DEMO = {1: demo_16do, 2: demo_phec, 3: demo_16di, 5: demo_8ai}
 
 rates = RATES if a.baud == "scan" else [int(a.baud)]
 addrs = [a.addr] if a.addr else range(1, 17)

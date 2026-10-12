@@ -95,6 +95,12 @@ Then exercise each module:
   matches the panel LEDs.
 - **PH_EC**: with probes connected the values appear; `invalid` (raw `0x7FFF`) means no probe, out
   of range or a fault on that channel. Poll every 2 s or slower, the module measures on a 2 s cycle.
+- **EX_8AI**: feed the field 24 V into A9 (V+) / B9 (0 V), set the DIP switch of channel k to ON for
+  4-20 mA or OFF for 0-10 V and write the matching range code to holding register `0x0210+k-1`
+  (0 = 0-10 V, 1 = 4-20 mA, 2 = 0-20 mA, 3 = 0-5 V). The script prints the eight engineering values
+  (FC04 0x0108: mA×100 or mV) and the fault bitmap (0x0110: open loop / over-range). An unconnected
+  4-20 mA channel reads below 3.6 mA with its fault bit set and its LED blinking — that is the
+  wire-break detection working.
 
 ## 5bis. Without Python: a serial terminal or a Modbus GUI
 
