@@ -426,6 +426,20 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   {
     if(HAL_ETH_Transmit_IT(&heth, &tx_config) == HAL_OK)
     {
+      /* direct edit (2026-10-11, registered in the CubeMX code-boundary rules doc): wait for the TX-complete
+       * interrupt and hand the descriptor + pbuf back NOW. This template only called
+       * HAL_ETH_ReleaseTxPacket on the BUSY path, i.e. once the 4-descriptor ring was full, so a
+       * transmitted pbuf kept ref==2 until four later frames pushed it out. lwIP refuses to
+       * retransmit a segment whose pbuf is still referenced by the driver
+       * (tcp_output_segment_busy -> tcp_rexmit_rto_prepare ERR_VAL): on a sparse MQTT link a lost
+       * segment sat un-retransmitted for 15-45 s with nrtx==0 and rto==3 (wda samples, both boards,
+       * 2026-10-10). The current ST template does exactly this synchronous release. */
+      if (osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT) != osOK)
+      {
+        /* TX-complete IRQ did not come within ETHIF_TX_TIMEOUT: do not spin, release whatever the
+         * DMA has finished and let lwIP carry on (the publish watchdog is the backstop) */
+      }
+      HAL_ETH_ReleaseTxPacket(&heth);
       errval = ERR_OK;
     }
     else
@@ -479,7 +493,6 @@ static struct pbuf * low_level_input(struct netif *netif)
  *
  * @param netif the lwip network interface structure for this ethernetif
  */
-volatile uint32_t dbg_sem_wake = 0, dbg_rx_frames = 0, dbg_input_err = 0, dbg_alloc_bad = 0; /* direct edit (nucleo diagnostic counters, referenced by app_mqtt heartbeat; not instrumented on 757 yet = always 0) */
 void ethernetif_input(void* argument)
 {
   struct pbuf *p = NULL;
@@ -853,7 +866,7 @@ void ethernet_link_thread(void* argument)
   }
 
 /* USER CODE BEGIN ETH link Thread core code for User BSP */
-
+  { extern void app_ethdiag_link_poll(uint32_t, int32_t); app_ethdiag_link_poll(LAN8742.DevAddr, PHYLinkState); }   /* app_ethdiag.c: link flaps + 10s PHY/DMA sample (this thread owns MDIO) */
 /* USER CODE END ETH link Thread core code for User BSP */
 
     osDelay(100);

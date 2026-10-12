@@ -30,7 +30,7 @@
 
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
-#define MQTT_OUTPUT_RINGBUF_SIZE 8192  /* must hold the largest desc (~5KB with per-module dash groups incl. PH_EC engineering points, 2026-08-09) plus a concurrent heartbeat/SUBSCRIBE; a too-small ring silently fails desc publish with ERR_MEM (dash then shows a stale sn / missing module cards — bitten twice: 07-18 sn, 08-09 module cards) */
+#define MQTT_OUTPUT_RINGBUF_SIZE 16384 /* must hold the largest desc in ONE message plus a concurrent heartbeat/SUBSCRIBE; a too-small ring silently fails desc publish with ERR_MEM (heartbeat "dsc":-1, dash then shows a stale sn / missing module cards — bitten three times: 07-18 sn, 08-09 module cards, 2026-10-12 i757-0003 with 4 modules: base 4K + EX_16DI 2.2K + PH_EC 1.4K + EX_8AI 1.6K + EX_16DO 0.4K = ~9.5K > 8K). 16K = base + ~5 modules; the ring lives in mqtt_client_new()'s heap block (lwip heap 56K, ~23K free with the 8K ring) */
 /* CubeMX does not generate MEM_SIZE -> opt.h defaults to only 1600B; the ETH driver holds up to 4 in-flight TX pbufs waiting for descriptor recycling,
  * 1600B is bound to run dry and deadlock as "alloc fails -> don't send -> don't recycle".
  * heap is at LWIP_RAM_HEAP_POINTER=0x30030000 (upper half of SRAM2, 64KB). Corresponds to LWIP->MEM_SIZE in CubeMX.
@@ -150,13 +150,13 @@
 #define LWIP_STATS_DISPLAY 0
 #define MEM_STATS 1
 #define MEMP_STATS 1
-#define LINK_STATS 0
-#define ETHARP_STATS 0
-#define IP_STATS 0
+#define LINK_STATS 1
+#define ETHARP_STATS 1
+#define IP_STATS 1
 #define IPFRAG_STATS 0
-#define ICMP_STATS 0
-#define UDP_STATS 0
-#define TCP_STATS 0
+#define ICMP_STATS 1
+#define UDP_STATS 1
+#define TCP_STATS 1
 #define SYS_STATS 0
 #define IGMP_STATS 0
 #define MIB2_STATS 0

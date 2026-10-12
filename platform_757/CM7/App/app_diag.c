@@ -403,7 +403,10 @@ void app_diag_hb(char *out7, uint16_t cap7, char *out4, uint16_t cap4,
 #include "app_mbport.h"
 
 #define MODS_MAX 8U
-typedef struct { uint8_t addr; uint16_t type; uint16_t fw; } mod_ident_t;
+typedef struct { uint8_t addr; uint16_t type; uint16_t fw;
+                 uint8_t ai_type[8];   /* EX_8AI: per-channel range code (holding 0x0210~), cached for
+                                        * the desc units; refreshed every beat by app_diag_mdata */
+               } mod_ident_t;
 static mod_ident_t s_mods[MODS_MAX];
 static uint16_t    s_nmods = 0;
 static uint16_t    s_mods_bitmap = 0;
@@ -418,8 +421,37 @@ const char *app_diag_mod_typename(uint16_t type)
     case 1U: return "EX_16DO";
     case 2U: return "PH_EC";
     case 3U: return "EX_16DI";
+    case 4U: return "EX_8RLY";
+    case 5U: return "EX_8AI";
     default: { static char b[10]; snprintf(b, sizeof(b), "TYPE%u", (unsigned)type); return b; }
   }
+}
+
+/* EX_8AI range code of channel k (0..7) on module i: 0 = 0-10 V, 1 = 4-20 mA, 2 = 0-20 mA,
+ * 3 = 0-5 V (module spec §3). desc_build turns it into the point's unit/scale. */
+uint8_t app_diag_mod_aitype(const void *m, uint16_t i, uint8_t k)
+{
+  return ((const mod_ident_t *)m)[i].ai_type[k & 7U];
+}
+
+/* EX_8AI (type 5): read the 8 range codes (FC03 0x0210) into the cache; returns 1 if they
+ * moved since the last call (-> desc needs a rebuild: unit/scale live in the desc). */
+#define MOD_TYPE_EX_8AI  5U
+#define AI8_TYPE_BASE    0x0210U
+static uint8_t ai8_refresh_types(mod_ident_t *m)
+{
+  uint8_t q[8], r[24];
+  uint16_t t[8];
+  uint8_t changed = 0;
+  int ql = mb_req_read(q, MB_FC_READ_HOLD, AI8_TYPE_BASE, 8U);
+  uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+  if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_HOLD, t, 8U) != 8)) { return 0; }
+  for (uint8_t k = 0; k < 8U; k++)
+  {
+    uint8_t v = (uint8_t)(t[k] & 3U);
+    if (m->ai_type[k] != v) { m->ai_type[k] = v; changed = 1U; }
+  }
+  return changed;
 }
 
 uint16_t app_diag_mod_list(const void **out)   /* -> cached ident table for desc_build */
@@ -465,6 +497,8 @@ static void mods_reident(uint16_t bitmap)
     s_mods[s_nmods].addr = a;
     s_mods[s_nmods].type = regs[1];
     s_mods[s_nmods].fw   = regs[2];
+    memset(s_mods[s_nmods].ai_type, 0, sizeof(s_mods[s_nmods].ai_type));
+    if (regs[1] == MOD_TYPE_EX_8AI) { (void)ai8_refresh_types(&s_mods[s_nmods]); }
     s_nmods++;
   }
   s_mods_dirty = 1;
@@ -556,6 +590,31 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
                                   (unsigned)m->addr, (unsigned)(k + 1U), (unsigned long)cnt);
         }
       }
+      continue;
+    }
+    if (m->type == MOD_TYPE_EX_8AI)           /* 8 engineering values + fault bitmap (spec §3,
+                                             * contract v0.34: FC04 0x0108~0x010F ENG, 0x0110 AI_STATUS) */
+    {
+      uint8_t qa[8], ra[24];
+      uint16_t v9[9];
+      int ql = mb_req_read(qa, MB_FC_READ_INPUT, 0x0108U, 9U);
+      uint16_t rl = app_mb_transact(m->addr, qa, (uint16_t)ql, ra, 1);
+      if ((rl > 0U) && (mb_rsp_regs(ra, rl, MB_FC_READ_INPUT, v9, 9U) == 9))
+      {
+        for (uint8_t k = 0; (k < 8U) && (n < cap); k++)
+        {
+          n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%ua%u\":%u",
+                                  (unsigned)m->addr, (unsigned)(k + 1U), (unsigned)v9[k]);
+        }
+        if (n < cap)
+        {
+          n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%uast\":%u",
+                                  (unsigned)m->addr, (unsigned)(v9[8] & 0xFFU));
+        }
+      }
+      /* range codes may be changed over the bus (mbw / a customer's own master): the unit
+       * and scale live in the desc, so a change re-issues the desc on the next loop pass */
+      if (ai8_refresh_types((mod_ident_t *)m)) { s_mods_dirty = 1; }
       continue;
     }
     if (m->type != MOD_TYPE_PH_EC) { continue; }

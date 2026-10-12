@@ -92,6 +92,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app_netcfg.c                              # static-fallback IP runtime config (littlefs net.cfg, 2026-08-31)
     App/app_pimage_cm7.c                          # process-image I/O scanner API (app_io_*, SRAM4 image, 2026-07-19)
     App/app_diag.c                                # 'tasks' CLI: both cores' stacks + heap (2026-07-19)
+    App/app_ethdiag.c                             # Ethernet receive-path diagnostics for stat/heartbeat/status (2026-10-09)
     App/app_hsdi.c                                # onboard HSDI CLI view (channels owned by CM4, 2026-07-19)
     App/app_pwrfail_test.c                        # power-fail three-layer retention mechanism (API=app_pwrfail.h; predecessor=window measurement, 2026-07-18)
     App/app_sec_test.c                            # dual secure-element first test (608A wake/SE050 ENA, CLI sec)

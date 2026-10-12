@@ -93,6 +93,7 @@ static void cmd_stat(void)
          ip4addr_ntoa(netif_ip4_addr(&gnetif)),
          netif_is_link_up(&gnetif) ? "up" : "DOWN",
          mqtt_cloud_ok() ? "ok" : "---");
+  { extern void app_ethdiag_print(void); app_ethdiag_print(); }   /* eth/mac/phy/lwip receive-path counters (2026-10-09 deaf-board case) */
   printf("ota: bank=%lu state=%s evt=\"%s\"%s\n\r",
          (unsigned long)(ota_swap_active() + 1U), ota_state_str(), ota_last_evt(),
          ota_in_trial() ? " [TRIAL]" : "");

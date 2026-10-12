@@ -29,6 +29,7 @@ extern const char *app_p5_str(void);   /* 757: storage self-test result (app_p5_
 #include "lwip/priv/tcp_priv.h"    /* kick autopsy peeks at the inner tcp_pcb (unsent/unacked/rtime) — diagnostics only */
 #include "lwip/altcp_tls.h"
 #include "lwip/stats.h"            /* offline-watchdog autopsy: lwip mem/memp usage (ERR_MEM source disambiguation) */
+#include "app_ethdiag.h"            /* receive-path diagnostics: heartbeat rx/age, status "eth", autopsy rxage/arp (2026-10-09) */
 #include "lwip/etharp.h"           /* heal-ladder rung 2: gratuitous ARP re-announce (WiFi-bridge translation tables) */
 #include "app_pwrfail.h"           /* PF_RETAIN: rung-3 self-reset budget survives the reset it causes */
 #include "app_cfg.h"
@@ -81,8 +82,8 @@ static volatile uint8_t  s_status_dirty = 0;   /* report-on-change: set to 1 and
 static volatile uint16_t s_diag_skip_conn = 0;   /* attempts skipped: client claimed MQTT_CONNECTED while s_mqtt_up==0 (wedge hypothesis A) */
 static volatile int8_t   s_diag_conn_err = 0;    /* last immediate mqtt_client_connect() error code */
 static volatile uint16_t s_mq_autopsies = 0;     /* 120s-offline autopsy events since boot (heartbeat "mqfix") */
-static char s_autopsy[208] = "none";             /* last autopsy line (CLI stat + heartbeat "mqa"); sized for worst-case field widths */
-static char s_wda[304] = "none";                 /* publish-watchdog wedge autopsy: TX-halt state photographed right
+static char s_autopsy[256] = "none";             /* last autopsy line (CLI stat + heartbeat "mqa"); sized for worst-case field widths (+rxage/arp 2026-10-09) */
+static char s_wda[416] = "none";                 /* publish-watchdog wedge autopsy: TX-halt state photographed right
                                                   * before the forced reconnect; rides the post-reconnect heartbeat
                                                   * as "wda" (2026-08-23, pcap-verified 15s TX halts) */
 static volatile uint16_t s_wda_cnt = 0;          /* wedge autopsies since boot */
@@ -91,8 +92,14 @@ static volatile int8_t   s_diag_pub_last = 0;    /* last mqtt_publish() retcode 
 static volatile uint16_t s_mq_kicks = 0;         /* TX-stall gentle kicks fired (watchdog stage 1, heartbeat "mqk") */
 static volatile uint16_t s_mq_kick_cures = 0;    /* stalls that resumed after a kick, reconnect avoided ("mqkc") */
 static uint8_t           s_kick_armed = 0;       /* a kick is outstanding for the current stall */
+/* Publish-watchdog force-reconnect threshold, in 5 s stages. 3 (= 15 s) from 2026-08-23 to 2026-10-09;
+ * raised to 9 (= 45 s, the broker keep-alive window: 30 s x 1.5) for the 2026-10-09 A/B after the
+ * app_ethdiag read-out showed every forced reconnect on 608a/0003 was a sent segment whose ACK was
+ * late (uns=0 una=1 rt=20..30, receive path clean): a 15 s gate turns a short uplink outage into a
+ * dash "down" event although TCP retransmission would have carried the connection through. */
+#define MQTT_WD_RECONNECT_STAGES 9U
 static volatile uint16_t s_mq_rexmits = 0;       /* forced RTO retransmits fired by the kick (folded into "wda") */
-static char s_kda[112] = "";                     /* kick autopsy: inner tcp_pcb state at kick time (folded into "wda"
+static char s_kda[224] = "";                     /* kick autopsy: inner tcp_pcb state at kick time (folded into "wda"
                                                   * on escalation) — discriminates unsent-stranded (kick cures) vs
                                                   * transmitted-and-lost / timer-wedged subspecies (kick can't) */
 /* ETH MAC hardware TX forensics (2026-08-25 four-hour reconnect mute, WiFi-bridge topology):
@@ -111,7 +118,8 @@ extern uint8_t  app_demo_hsdi_bits(void);
 extern uint32_t app_demo_count(uint8_t idx);
 extern uint16_t app_demo_relays(void);
 
-static char s_pub_buf[3968];  /* heartbeat JSON buffer (640->1280 health block; ->1536 module health mtsk, 2026-07-25;
+static char s_pub_buf[4224];  /* heartbeat JSON buffer (640->1280 health block; ->1536 module health mtsk, 2026-07-25;
+                               * ->4224 EX_8AI 8 values + fault bitmap in mdata (768->1024), 2026-10-12.
                                * ->3648 publish-watchdog wedge autopsy "wda" field, 2026-08-23.
                                * ->2560 PH_EC engineering mdata; ->2944 mbr/mbw "cmdr" result field, 2026-08-09;
                                * ->3392 EX_16DI level bitmap + 16 counters in mdata, 2026-08-13;
@@ -379,6 +387,11 @@ static void desc_build(void)
       n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
              ",{\"id\":\"m%up\",\"name\":\"Slot %u: DI Inputs\"}", a, a);
     }
+    if (app_diag_mod_type(mods, i) == 5U)   /* EX_8AI: analog inputs card */
+    {
+      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+             ",{\"id\":\"m%up\",\"name\":\"Slot %u: Analog Inputs\"}", a, a);
+    }
   }
   n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_G_SYS);
   for (uint16_t i = 0; i < nm; i++)         /* health cards, address order, after System */
@@ -424,6 +437,26 @@ static void desc_build(void)
              ",{\"id\":\"m%u.c%u\",\"name\":\"Counter DI%u\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uc%u\"}",
              a, k, k, a, a, k);
       }
+    }
+    if (app_diag_mod_type(mods, i) == 5U)   /* EX_8AI: 8 engineering values (spec §3, contract
+                                             * v0.34) + fault bitmap, grouped on process card
+                                             * m<addr>p. Unit/scale follow each channel's range
+                                             * code (mA×100 or mV on the wire); a range change on
+                                             * the module re-issues this desc (app_diag_mdata). */
+    {
+      extern uint8_t app_diag_mod_aitype(const void *m, uint16_t i, uint8_t k);
+      static const char *rng[4] = { "0-10V", "4-20mA", "0-20mA", "0-5V" };
+      for (unsigned k = 1; k <= 8U; k++)
+      {
+        uint8_t t = app_diag_mod_aitype(mods, i, (uint8_t)(k - 1U));
+        uint8_t ma = (uint8_t)((t == 1U) || (t == 2U));
+        n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+             ",{\"id\":\"m%u.a%u\",\"name\":\"AI %u (%s)\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%s\",\"group\":\"m%up\",\"f\":\"m%ua%u\",\"scale\":%s}",
+             a, k, k, rng[t & 3U], ma ? "mA" : "V", a, a, k, ma ? "0.01" : "0.001");
+      }
+      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+           ",{\"id\":\"m%u.ast\",\"name\":\"AI Faults (open loop / over-range)\",\"kind\":\"bits\",\"width\":8,\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uast\"}",
+           a, a, a);
     }
   }
   n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_TAIL);
@@ -529,6 +562,10 @@ static void mqtt_connect_cb(void *arg)  /* tcpip thread */
       s_diag_conn_err = (int8_t)ce;   /* evidence: which error eats the silent retries */
       s_mqtt_connecting = 0;          /* immediate failure has no callback, must clear the flag manually or it never retries */
     }
+    else
+    {
+      s_diag_conn_err = 0;   /* an accepted connect clears it: a stale ERR_RTE from a transient 0.0.0.0 window misled the 2026-10-09 i757-0003 read-out (SYNs were in fact leaving) */
+    }
     /* NAGLE — WANTED BUT WITHDRAWN (2026-08-23). Motive: pcap showed the stage-1 kick's forced
      * retransmit of a lost sub-MSS record being PARKED by Nagle ("small segment while data is
      * unacked") until the close's FIN flushed it 15 s too late; TCP_NODELAY is the textbook
@@ -620,11 +657,16 @@ static void mqtt_kick_cb(void *arg)  /* tcpip thread: transmit TCP segments stra
     struct tcp_pcb *t = (inner != NULL) ? (struct tcp_pcb *)inner->state : NULL;
     if (t != NULL)
     {
-      snprintf(s_kda, sizeof(s_kda), "k uns=%d una=%d rt=%d nrtx=%u cwnd=%u wnd=%u fl=%02x rx=%u",
+      /* rto/sa/sv (500 ms ticks): the RTT estimator - one late ACK inflates rto for minutes, and
+       * rto > 30 ticks is exactly why nrtx stays 0 inside the watchdog budget (2026-10-10). The tx
+       * fragment (app_ethdiag) says whether the stranded record ever left the MAC. */
+      char txs[96];
+      app_ethdiag_tx_snap(txs, sizeof(txs));
+      snprintf(s_kda, sizeof(s_kda), "k uns=%d una=%d rt=%d nrtx=%u rto=%d sa=%d sv=%d cwnd=%u wnd=%u fl=%02x rx=%u %s",
                (int)(t->unsent != NULL), (int)(t->unacked != NULL),
-               (int)t->rtime, (unsigned)t->nrtx,
+               (int)t->rtime, (unsigned)t->nrtx, (int)t->rto, (int)t->sa, (int)t->sv,
                (unsigned)t->cwnd, (unsigned)t->snd_wnd, (unsigned)t->flags,
-               (unsigned)s_mq_rexmits);
+               (unsigned)s_mq_rexmits, txs);
       /* subspecies B (wda #2 kick autopsy, 2026-08-23): the record was transmitted and lost on
        * the 4G uplink, and this connection's RTO has inflated past the 15 s watchdog budget
        * (rtime counting, nrtx==0, retransmit never fires before the reconnect). Waiting out a
@@ -754,6 +796,7 @@ static void tick_corrupt_report(uint8_t stage, uint32_t bad, uint32_t good)
 void mqtt_app_task(void)
 {
   extern struct netif gnetif;
+  app_ethdiag_init();   /* wrap gnetif.input: frames-to-lwIP counter + last-frame age (MX_LWIP_Init already ran) */
   /* TLS base: hardware RNG + mbedTLS memory pool, then parse the cert triple to build the client config (mutual auth) */
   app_tls_init();   /* hardware RNG + mbedTLS pool (also used by anti-clone) — kept in both modes */
   /* device identity: littlefs identity partition first, embedded cert as fallback
@@ -977,7 +1020,7 @@ void mqtt_app_task(void)
         extern void app_diag_mdata(char *o, uint16_t cap);
         extern const char *app_diag_reset_cause(void);
         static char tsk7_str[300]; static char tsk4_str[320];
-        static char flt_str[48]; static char mtsk_str[520]; static char mdata_str[768]; /* PH_EC 8 fields + EX_16DI di+16 counters per module */
+        static char flt_str[48]; static char mtsk_str[520]; static char mdata_str[1024]; /* PH_EC 8 fields + EX_16DI di+16 counters + EX_8AI 8 values+bitmap per module */
         uint8_t cpu7 = 0, cpu4 = 0; uint32_t stkmin = 0;
         app_diag_hb(tsk7_str, sizeof(tsk7_str), tsk4_str, sizeof(tsk4_str), &cpu7, &cpu4, &stkmin);
         app_diag_fault_str(flt_str, sizeof(flt_str));
@@ -987,7 +1030,7 @@ void mqtt_app_task(void)
           if (app_diag_mods_dirty()) { desc_build(); s_desc_pub_err = 1; tcpip_callback(mqtt_desc_republish_cb, NULL); } }
       { extern uint32_t app_se_hs608_count(void); extern uint32_t app_se_hs608_fail(void);
         snprintf(s_pub_buf, sizeof(s_pub_buf),
-               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"aer\":%u,\"aerm\":\"%s\",\"dose\":\"%s\",\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
+               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"eth\":\"%s\",\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"aer\":%u,\"aerm\":\"%s\",\"dose\":\"%s\",\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
                FW_VERSION, (s_broker == BRK_AWS) ? "aws" : (s_broker == BRK_LAN) ? "lan" : "pub",
                (s_clone == APP_AC_GENUINE) ? "ok" : (s_clone == APP_AC_ABSENT) ? "nose" : "clone",
                (unsigned long)app_se_hs608_count(), (unsigned long)app_se_hs608_fail(), (int)s_desc_pub_err,
@@ -996,7 +1039,7 @@ void mqtt_app_task(void)
                ota_signer_str(), app_fwkey2_fp(),
                (unsigned long)app_time_now(),
                (unsigned long)ota_recv(),
-               (unsigned long)tick, (unsigned long)eth_irq_count,
+               (unsigned long)tick, (unsigned long)eth_irq_count, app_ethdiag_hb(),
                (unsigned int)xPortGetFreeHeapSize(), (unsigned long)s_mqtt_pub_ok,
                (int)({ extern uint8_t app_beep_get(void); app_beep_get(); }), app_temp_read(),
                (unsigned)app_demo_hsdi_bits(),
@@ -1033,7 +1076,7 @@ void mqtt_app_task(void)
       {
         wd_last_pub = s_mqtt_pub_ok;
         wd_stale = 0;
-        if (s_kick_armed) { s_kick_armed = 0; s_mq_kick_cures++; }   /* stage-1 kick unwedged it: no reconnect needed */
+        if (s_kick_armed) { s_kick_armed = 0; s_mq_kick_cures++; }   /* stall ended before the reconnect gate (kick or TCP RTO): "mqkc" */
       }
       else if (wd_stale < 2U)   /* stages 1+2 (5s/10s stalled): gentle kick — flush stranded unsent TCP segments */
       {
@@ -1042,7 +1085,7 @@ void mqtt_app_task(void)
         wd_stale++;
         tcpip_callback(mqtt_kick_cb, NULL);
       }
-      else if (++wd_stale >= 3U)
+      else if (++wd_stale >= MQTT_WD_RECONNECT_STAGES)   /* stages 3..N-1: let TCP retransmit on its own RTO ladder */
       {
         s_kick_armed = 0;
         wd_stale = 0;
@@ -1109,20 +1152,22 @@ void mqtt_app_task(void)
         if (s_mqtt != NULL)
         {
           snprintf(s_autopsy, sizeof(s_autopsy),
-                   "st=%u pcb=%d tlspool=%u/%uK lmem=%u/e%u tpcb=%u/e%u cerr=%d cing=%u fails=%u tx=+%lu dsr=%04lx",
+                   "st=%u pcb=%d tlspool=%u/%uK lmem=%u/e%u tpcb=%u/e%u cerr=%d cing=%u fails=%u tx=+%lu dsr=%04lx rxage=%lu arp=%u/%u",
                    (unsigned)s_mqtt->conn_state, (int)(s_mqtt->conn != NULL),
                    (unsigned)pcur, (unsigned)(pmax / 1024U),
                    lmem_u, lmem_e, tpcb_u, tpcb_e,
                    (int)s_diag_conn_err, (unsigned)s_mqtt_connecting, (unsigned)s_conn_fails,
-                   (unsigned long)mmc_d, (unsigned long)(ETH->DMADSR & 0xFFFFU));
+                   (unsigned long)mmc_d, (unsigned long)(ETH->DMADSR & 0xFFFFU),
+                   (unsigned long)app_ethdiag_rx_age_s(), (unsigned)lwip_stats.etharp.recv, (unsigned)lwip_stats.etharp.xmit);
         }
         else
         {
           snprintf(s_autopsy, sizeof(s_autopsy),
-                   "client=NULL tlspool=%u/%uK lmem=%u/e%u tpcb=%u/e%u cerr=%d tx=+%lu dsr=%04lx",
+                   "client=NULL tlspool=%u/%uK lmem=%u/e%u tpcb=%u/e%u cerr=%d tx=+%lu dsr=%04lx rxage=%lu arp=%u/%u",
                    (unsigned)pcur, (unsigned)(pmax / 1024U),
                    lmem_u, lmem_e, tpcb_u, tpcb_e, (int)s_diag_conn_err,
-                   (unsigned long)mmc_d, (unsigned long)(ETH->DMADSR & 0xFFFFU));
+                   (unsigned long)mmc_d, (unsigned long)(ETH->DMADSR & 0xFFFFU),
+                   (unsigned long)app_ethdiag_rx_age_s(), (unsigned)lwip_stats.etharp.recv, (unsigned)lwip_stats.etharp.xmit);
         }
         s_mq_autopsies++;
         printf("[MQTT] autopsy #%u: %s\n\r", (unsigned)s_mq_autopsies, s_autopsy);
@@ -1206,14 +1251,15 @@ void mqtt_app_task(void)
     if ((tick & 1U) == 0U)
     {
       extern volatile uint32_t eth_irq_count;
-      extern volatile uint32_t dbg_sem_wake, dbg_rx_frames, dbg_input_err, dbg_alloc_bad;
-      printf("[CM7] tick=%lu %s link=%s rxirq=%lu wake=%lu frm=%lu ierr=%lu abad=%lu heap=%u\n\r",
+      /* rx = frames handed to lwIP, age = seconds since the last one, ierr = tcpip mailbox refusals
+       * (app_ethdiag; replaced the never-instrumented wake/frm/abad zeros, 2026-10-09) */
+      printf("[CM7] tick=%lu %s link=%s rxirq=%lu rx=%lu age=%lus ierr=%lu heap=%u\n\r",
              (unsigned long)tick,
              app_rpc_alive() ? "RPC-OK" : "CM4-NO-RESP",
              netif_is_link_up(&gnetif) ? "UP" : "DOWN",
              (unsigned long)eth_irq_count,
-             (unsigned long)dbg_sem_wake, (unsigned long)dbg_rx_frames,
-             (unsigned long)dbg_input_err, (unsigned long)dbg_alloc_bad,
+             (unsigned long)app_ethdiag_rx_frames(), (unsigned long)app_ethdiag_rx_age_s(),
+             (unsigned long)app_ethdiag_in_err(),
              (unsigned int)xPortGetFreeHeapSize());
     }
     tick++;
