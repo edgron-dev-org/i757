@@ -36,6 +36,9 @@ The cost: half the flash only stores the "previous version." For a 2MB H7 with a
  ────────────────                    ──────────────────────────────
  1 ota-begin 0 <size> <crc>    →     erase the entire spare bank (8 sectors, ~8s)
  2 push blocks: 8B header[OTA1+offset]+1KB   →     tcpip thread→ring buffer→defaultTask writes flash
+   A block must lie wholly inside the segment declared by ota-begin (offset < size and
+   offset + length <= size); anything else is dropped, so the bank tail (confirm word, footer)
+   can only ever be written by the board itself after the signature check.
  3 (board, automatic)                segment complete → read back flash, recompute CRC ──── Gate ① integrity
  4 CM4 segment repeats 2-3 (offset 0x80000)
  5 ota-sign <ECDSA signature hex>     →     verify SHA256(cm7‖cm4) ─────── Gate ② authenticity

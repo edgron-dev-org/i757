@@ -90,8 +90,8 @@ static int mota_poll_status(uint8_t addr, uint8_t want, uint32_t timeout_ms)
   uint32_t t0 = HAL_GetTick();
   for (;;)
   {
-    uint8_t pdu[1] = { 0x44U }, rsp[8];
-    uint16_t rl = app_mb_transact(addr, pdu, 1, rsp, 1);
+    uint8_t pdu[1] = { 0x44U }, rsp[16];   /* status reply is 9 B */
+    uint16_t rl = app_mb_transact(addr, pdu, 1, rsp, sizeof(rsp), 1);
     if ((rl >= 5U) && (rsp[0] == 0x44U) && (rsp[1] == want)) { return 0; }
     if ((HAL_GetTick() - t0) > timeout_ms) { return -1; }
     HAL_Delay(50);
@@ -111,7 +111,7 @@ int mota_flash(uint8_t addr)
     uint16_t regs[9] = {0};
     uint16_t hw = 0;
     int n2 = mb_req_read(q, MB_FC_READ_INPUT, 0, 4);     /* legacy region (recognized by all slave versions) */
-    uint16_t rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, 1);
+    uint16_t rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, sizeof(r2), 1);
     if ((rl2 == 0U) || (mb_rsp_regs(r2, rl2, MB_FC_READ_INPUT, regs, 4) != 4))
     {
       printf("[MOTA] slave %u ident failed\n\r", (unsigned)addr);
@@ -120,7 +120,7 @@ int mota_flash(uint8_t addr)
     }
     mtype = regs[1];
     n2 = mb_req_read(q, MB_FC_READ_INPUT, 8, 1);         /* 0x0008 HW_VER: old firmware lacks this register = exception, tolerated */
-    rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, 1);
+    rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, sizeof(r2), 1);
     if ((rl2 > 0U) && (mb_rsp_regs(r2, rl2, MB_FC_READ_INPUT, &hw, 1) == 1)) { }
     printf("[MOTA] slave %u: type=%u hw=0x%04X fw=0x%04X\n\r",
            (unsigned)addr, (unsigned)mtype, (unsigned)hw, (unsigned)regs[2]);
@@ -146,7 +146,7 @@ int mota_flash(uint8_t addr)
   pdu[3] = (uint8_t)(size >> 8);  pdu[4] = (uint8_t)size;
   pdu[5] = (uint8_t)(crc >> 24);  pdu[6] = (uint8_t)(crc >> 16);
   pdu[7] = (uint8_t)(crc >> 8);   pdu[8] = (uint8_t)crc;
-  uint16_t rl = app_mb_transact(addr, pdu, 9, rsp, 1);
+  uint16_t rl = app_mb_transact(addr, pdu, 9, rsp, sizeof(rsp), 1);
   if ((rl < 2U) || (rsp[0] != 0x41U) || (rsp[1] != 0U))
   {
     printf("[MOTA] begin rejected\n\r"); app_log_event("SYSTEM", "mota m%u begin rejected", (unsigned)addr); (void)lfs_file_close(l, &f); return -2;
@@ -166,7 +166,7 @@ int mota_flash(uint8_t addr)
     {
       pdu[0] = 0x42U; pdu[1] = (uint8_t)(seq >> 8); pdu[2] = (uint8_t)seq;
       memcpy(&pdu[3], buf, (size_t)n);
-      rl = app_mb_transact(addr, pdu, (uint16_t)(3 + n), rsp, 1);
+      rl = app_mb_transact(addr, pdu, (uint16_t)(3 + n), rsp, sizeof(rsp), 1);
       if ((rl >= 4U) && (rsp[0] == 0x42U) && (rsp[1] == 0U)) { break; }
       if ((rl >= 4U) && (rsp[0] == 0x42U)
           && ((uint16_t)(((uint16_t)rsp[2] << 8) | rsp[3]) == (uint16_t)(seq + 1U)))
@@ -185,7 +185,7 @@ int mota_flash(uint8_t addr)
 
   {
     uint8_t q[1] = { 0x44U }, r2[16];                    /* commit pre-check: compare rolling CRC on both sides */
-    rl = app_mb_transact(addr, q, 1, r2, 1);
+    rl = app_mb_transact(addr, q, 1, r2, sizeof(r2), 1);
     if (rl >= 9U)
     {
       uint32_t scrc = ((uint32_t)r2[5] << 24) | ((uint32_t)r2[6] << 16) | ((uint32_t)r2[7] << 8) | r2[8];
@@ -196,7 +196,7 @@ int mota_flash(uint8_t addr)
   }
 
   pdu[0] = 0x43U;                                        /* COMMIT -> slave swaps bank and resets */
-  rl = app_mb_transact(addr, pdu, 1, rsp, 1);
+  rl = app_mb_transact(addr, pdu, 1, rsp, sizeof(rsp), 1);
   if ((rl < 2U) || (rsp[0] != 0x43U) || (rsp[1] != 0U))
   {
     /* a suspicious reply != failure (stale-frame misjudgment proven: the slave may have already verified and be swapping bank); leave the verdict to the comeback probe */
@@ -213,11 +213,11 @@ int mota_flash(uint8_t addr)
       uint16_t regs[4] = {0};
       uint16_t hw = 0;
       int n2 = mb_req_read(q, MB_FC_READ_INPUT, 0, 4);
-      rl = app_mb_transact(addr, q, (uint16_t)n2, r2, 1);
+      rl = app_mb_transact(addr, q, (uint16_t)n2, r2, sizeof(r2), 1);
       if ((rl > 0U) && (mb_rsp_regs(r2, rl, MB_FC_READ_INPUT, regs, 4) == 4))
       {
         n2 = mb_req_read(q, MB_FC_READ_INPUT, 8, 1);
-        uint16_t rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, 1);
+        uint16_t rl2 = app_mb_transact(addr, q, (uint16_t)n2, r2, sizeof(r2), 1);
         if ((rl2 > 0U) && (mb_rsp_regs(r2, rl2, MB_FC_READ_INPUT, &hw, 1) == 1)) { }
         printf("[MOTA] slave %u back: type=%u hw=0x%04X fw=0x%04X — OTA OK\n\r",
                (unsigned)addr, (unsigned)regs[1], (unsigned)hw, (unsigned)regs[2]);

@@ -382,6 +382,10 @@ static void vent_tick(void)
     {
       s_faulted = 1;
       app_log_event("FAULT", "vent air sensor lost -> close");
+      /* The night floor must not hold the window open blind: rain and frost guards read the same
+       * module. Drop it first, or vent_go() would lift the close back to the floor (review P4). */
+      if (s_night_active) { app_log_event("ACTION", "vent night-cool off (air sensor)"); }
+      s_night_active = 0; s_floor = 0; s_non_s = 0; s_noff_s = 0; s_night_why = "sensor";
       if (s_mode == VENT_MODE_AUTO) { vent_go(0, "sensor-lost"); }
     }
     if (s_mode != VENT_MODE_OFF) { vent_assert((s_mode == VENT_MODE_MANUAL) ? s_manual_stage : s_stage); }

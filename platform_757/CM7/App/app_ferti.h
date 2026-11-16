@@ -153,7 +153,7 @@ typedef struct {
 
   /* chemistry run state */
   volatile uint8_t mode;             /* FERTI_M_* */
-  int8_t   run; uint32_t run_ms;
+  int8_t   run; uint32_t run_ms; uint8_t rel_done;   /* rel_done: coils dropped once on entering release */
   struct { uint8_t pump; uint16_t ml; } q[FERTI_QLEN]; uint8_t qn;
   uint16_t ml_h[FERTI_CAP_HOURS][FERTI_PUMPS]; uint8_t hi; uint32_t hour_s;
   uint8_t  caphold;
@@ -222,5 +222,6 @@ const char *ferti_desc_more(void);                       /* self-description poi
 ferti_sys_t *ferti_by_name(const char *name, int len);
 ferti_sys_t *ferti_first(void);
 uint8_t ferti_count(void);
+int  ferti_owns_coil(uint16_t pt, uint8_t ch);           /* 1 = some instance drives this coil (dosing pump / fill / stir / irrigation): bench tools keep off */
 
 #endif /* APP_FERTI_H */

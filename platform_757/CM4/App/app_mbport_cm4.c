@@ -114,7 +114,7 @@ static uint32_t s_last_rx_ms  = 0;               /* last time ANY frame arrived:
 static uint32_t s_rx_kicks    = 0;               /* tripwire firings (SWD-readable forensics) */
 
 uint16_t mbport_cm4_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                             uint8_t *rsp_pdu, uint8_t expect_rsp)
+                             uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp)
 {
   static uint8_t adu[MB_ADU_MAX], f[MB_ADU_MAX];
   int n;
@@ -137,6 +137,7 @@ uint16_t mbport_cm4_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
       uint16_t rpn;
       if (mb_adu_check(f, rn, &src, &rp, &rpn) != 0) { bus_cm4_unlock(BUS_BACKPLANE); return 0; }
       if (src != addr) { bus_cm4_unlock(BUS_BACKPLANE); return 0; }
+      if (rpn > rsp_cap) { rpn = rsp_cap; }      /* never write past the caller's buffer: a long or late reply is cut, the caller sees rsp_cap bytes */
       memcpy(rsp_pdu, rp, rpn);
       bus_cm4_unlock(BUS_BACKPLANE);
       return rpn;
@@ -169,7 +170,7 @@ int mbport_cm4_slot_do_write(uint8_t s, uint32_t mask)   /* write-through: FC15 
   uint8_t bits[2] = { (uint8_t)(mask & 0xFFU), (uint8_t)((mask >> 8) & 0xFFU) };
   if ((s < 1U) || (s > 16U) || (((s_online >> (s - 1U)) & 1U) == 0U)) { return -1; }
   int n = mb_req_write_coils(pdu, 0, 16, bits);
-  uint16_t rl = mbport_cm4_transact(s, pdu, (uint16_t)n, rsp, 1);
+  uint16_t rl = mbport_cm4_transact(s, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
   if ((rl == 0U) || (mb_rsp_write_ok(rsp, rl, MB_FC_WRITE_COILS, 0, 16) != 0)) { return -1; }
   s_slot_do[s] = mask;
   return 0;
@@ -180,7 +181,7 @@ static uint16_t sched_ident(uint8_t addr)
   uint8_t pdu[5], rsp[16];
   uint16_t regs[4];
   pdu[0] = MB_FC_READ_INPUT; mb_put16(&pdu[1], 0); mb_put16(&pdu[3], 4);
-  uint16_t rl = mbport_cm4_transact(addr, pdu, 5, rsp, 1);
+  uint16_t rl = mbport_cm4_transact(addr, pdu, 5, rsp, sizeof(rsp), 1);
   if ((rl > 0U) && (mb_rsp_regs(rsp, rl, MB_FC_READ_INPUT, regs, 4) == 4))
   {
     s_slot_type[addr] = regs[1];               /* archive registry opportunistically (0x0001=type, 0x0002=fw) */
@@ -193,7 +194,7 @@ static void sched_do_readback(uint8_t addr)    /* opportunistic FC01 real read-b
 {
   uint8_t pdu[8], rsp[16], bits[2] = {0};
   int n = mb_req_read(pdu, MB_FC_READ_COILS, 0, 16);
-  uint16_t rl = mbport_cm4_transact(addr, pdu, (uint16_t)n, rsp, 1);
+  uint16_t rl = mbport_cm4_transact(addr, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
   if ((rl > 0U) && (mb_rsp_bits(rsp, rl, MB_FC_READ_COILS, bits, 2) == 2))
   {
     s_slot_do[addr] = (s_slot_do[addr] & 0xFFFF0000UL) | (uint32_t)bits[0] | ((uint32_t)bits[1] << 8);
@@ -205,7 +206,7 @@ void mbport_cm4_time_push(uint32_t unix_s)       /* op=3: broadcast FC16 hold 0.
   uint8_t pdu[16], rsp[8];
   uint16_t t[3] = { (uint16_t)(unix_s >> 16), (uint16_t)(unix_s & 0xFFFFU), 0 };
   int n = mb_req_write_regs(pdu, 0, 3, t);
-  if (n > 0) { (void)mbport_cm4_transact(0, pdu, (uint16_t)n, rsp, 0); s_bcasts++; }
+  if (n > 0) { (void)mbport_cm4_transact(0, pdu, (uint16_t)n, rsp, sizeof(rsp), 0); s_bcasts++; }
 }
 
 uint16_t mbport_cm4_uart_stats(uint8_t *out)     /* op=5: keep the 2-port 40B format, port 2 = all zeros */
@@ -284,7 +285,7 @@ static void naturalize_one(uint8_t a)
   uint8_t pdu[8], rsp[16];
   uint16_t reg;
   int n = mb_req_read(pdu, 0x03U, 0x0281U, 1U);              /* FC03 read BAUD_BOOT */
-  uint16_t rl = mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, 1U);
+  uint16_t rl = mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, sizeof(rsp), 1U);
   if (rl == 0U) { return; }                                  /* silent: retry next tick */
   if ((rsp[0] & 0x80U) != 0U)                                /* exception (02 = no config area) */
   {
@@ -295,10 +296,10 @@ static void naturalize_one(uint8_t a)
   if (reg != 0U)
   {
     n = mb_req_write_single(pdu, 0x06U, 0x0281U, 0U);        /* boot baud -> 1M */
-    if (mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, 1U) == 0U) { return; }
+    if (mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, sizeof(rsp), 1U) == 0U) { return; }
     if ((rsp[0] & 0x80U) != 0U) { s_naturalized |= (uint16_t)(1U << (a - 1U)); return; }
     n = mb_req_write_single(pdu, 0x06U, 0x0200U, 0xA55AU);   /* persist */
-    if (mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, 1U) == 0U) { return; }
+    if (mbport_cm4_transact(a, pdu, (uint16_t)n, rsp, sizeof(rsp), 1U) == 0U) { return; }
   }
   s_naturalized |= (uint16_t)(1U << (a - 1U));
 }

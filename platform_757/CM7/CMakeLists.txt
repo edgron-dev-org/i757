@@ -49,6 +49,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     HAL_IWDG_MODULE_ENABLED   # IWDG owned by App code (modular HAL mechanism, does not touch hal_conf.h)
     APP_SE_BACKEND_608B       # anti-clone SE backend: 2026-07-18 switched to real 608A (app_se_608b->atecc_sign)
     LFS_NO_MALLOC             # LittleFS fully static buffers, disable malloc path at compile time
+    LFS_THREADSAFE            # one lfs_t shared by several tasks: every API call takes the mutex in app_lfs.c
     LFS_NO_DEBUG              # keep only WARN/ERROR prints (saves flash strings + CDC noise)
 )
 

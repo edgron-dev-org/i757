@@ -27,7 +27,7 @@
 
 /* backplane master transaction (app_mbport_cm4.c) */
 extern uint16_t mbport_cm4_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                                    uint8_t *rsp_pdu, uint8_t expect_rsp);
+                                    uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp);
 /* front-panel master transaction (app_mbfront_cm4.c) */
 extern uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
                                  uint16_t timeout_ms, uint16_t gap_ms, const uint8_t *pdu, uint16_t pn,
@@ -187,7 +187,7 @@ static uint16_t bus_transact(const pimg_entry_t *e, const uint8_t *pdu, uint16_t
 {
   if (e->port == PIMG_PORT_BACKPLANE)
   {
-    return mbport_cm4_transact(e->addr, pdu, pn, rsp, 1U);
+    return mbport_cm4_transact(e->addr, pdu, pn, rsp, MB_PDU_MAX, 1U);   /* every caller's rsp is MB_PDU_MAX bytes */
   }
   {
     uint8_t st = 0;
@@ -312,13 +312,13 @@ static void backplane_event_sweep(void)
       uint8_t exc;
       int pn = mb_req_read(pdu, MB_FC_READ_HOLD, PSCAN_EV_REG, 1U);
       if (pn < 0) { return; }
-      uint16_t rl = mbport_cm4_transact(addr, pdu, (uint16_t)pn, rsp, 1U);
+      uint16_t rl = mbport_cm4_transact(addr, pdu, (uint16_t)pn, rsp, sizeof(rsp), 1U);
       if ((rl == 0U) || mb_rsp_is_exception(rsp, rl, &exc)) { return; }
       if (mb_rsp_regs(rsp, rl, MB_FC_READ_HOLD, ev, 1U) != 1) { return; }
       if (ev[0] != 0U)
       {
         pn = mb_req_write_regs(pdu, PSCAN_EV_REG, 1U, ev);   /* W1C: clear exactly what we saw */
-        if (pn > 0) { (void)mbport_cm4_transact(addr, pdu, (uint16_t)pn, rsp, 1U); }
+        if (pn > 0) { (void)mbport_cm4_transact(addr, pdu, (uint16_t)pn, rsp, sizeof(rsp), 1U); }
       }
     }
     return;                                           /* one module per sweep tick */

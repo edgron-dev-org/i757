@@ -451,7 +451,7 @@ int app_mbport_master(uint8_t port, uint8_t slave_addr,
   if (port == APP_PORT_BACKPLANE)              /* backplane expansion bus = generic Modbus RTU on CM4 UART8 (always master) */
   {
     uint8_t brr[MB_PDU_MAX];
-    uint16_t br = app_mb_transact(slave_addr, pdu, pdu_len, brr, 1U);
+    uint16_t br = app_mb_transact(slave_addr, pdu, pdu_len, brr, sizeof(brr), 1U);
     if (br == 0U) { return -3; }
     uint16_t bn = (br > rsp_cap) ? rsp_cap : br;
     if (bn > 0U) { memcpy(rsp, brr, bn); }

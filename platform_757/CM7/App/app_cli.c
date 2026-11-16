@@ -23,6 +23,7 @@
 #include "app_rpc.h"
 #include "app_hsdi.h"
 #include "app_cfg.h"
+#include "app_qflash.h"
 #define APP_STR2(x) #x
 #define APP_STR(x)  APP_STR2(x)
 /* 757: input source = USB CDC ring (app_cdc_console.c), the uart_drv console path is retired */
@@ -57,6 +58,7 @@ static void cmd_help(void)
          "              id2-pub | id2-cert <hexDER> | id2-cert-show | id2-clear yes (guide: Connect_Your_Own_AWS_IoT)\n\r"
          "  fwkey2      customer OTA signing key (2nd verify key, USB only): fwkey2 | fwkey2 set <hex> | fwkey2 clear yes\n\r"
          "  beep 1|0    buzzer on/off\n\r"
+         "  lfs-format yes  wipe the config filesystem (only when it will not mount; identity is lost)\n\r"
          "  reboot      NVIC system reset\n\r"
          "  revert yes  swap firmware bank (same gate as cloud)\n\r"
          "  fwchunk <n> USB firmware ingest (tools/usb_fw_push.ps1; no-network OTA)\n\r"
@@ -194,6 +196,13 @@ static void cli_exec(char *line)
   if (strncmp(line, "mbw ", 4) == 0) { app_mb_reg_cli('w', line + 4); return; }
   if (strcmp(line, "hsdi") == 0)  { app_hsdi_cli(); return; }
   if (strcmp(line, "ustat") == 0) { cmd_ustat(); return; }
+  if (strcmp(line, "lfs-format yes") == 0)
+  {
+    int r = app_lfs_format_force();
+    printf("lfs-format: %s\n\r", (r == 0) ? "done (empty filesystem mounted; reboot)" :
+                                  (r == -1) ? "refused: filesystem is mounted and healthy" : "FAILED");
+    return;
+  }
   if (strcmp(line, "reboot") == 0)
   {
     printf("rebooting...\n\r");

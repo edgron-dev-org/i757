@@ -16,15 +16,18 @@
 
 /* ---- master transaction: handed to CM4 over RPMsg (protocol in file header) ---- */
 static uint16_t master_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                                uint8_t *rsp_pdu, uint8_t expect_rsp)
+                                uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp)
 {
   static uint8_t req[300], rsp[300];
+  if (pn > MB_PDU_MAX) { return 0; }
   req[0] = 0x01U; req[1] = addr; req[2] = expect_rsp;
   memcpy(&req[3], pdu, pn);
   uint16_t r = app_rpc_transact(req, (uint16_t)(3U + pn), rsp, sizeof(rsp), 150);
   if ((r < 1U) || (rsp[0] != 0U) || (expect_rsp == 0U)) { return 0; }
-  memcpy(rsp_pdu, &rsp[1], (size_t)(r - 1U));
-  return (uint16_t)(r - 1U);
+  r = (uint16_t)(r - 1U);
+  if (r > rsp_cap) { r = rsp_cap; }             /* never write past the caller's buffer (a long or late reply is cut to rsp_cap) */
+  memcpy(rsp_pdu, &rsp[1], (size_t)r);
+  return r;
 }
 
 /* ---- CLI 'mbr <addr> <reg> [n]' / 'mbw <addr> <reg> <val>' — generic backplane register
@@ -55,7 +58,7 @@ void app_mb_reg_str(char rw, const char *args, char *out, uint16_t cap)
     pdu[0] = 0x06U;                            /* FC06 write single holding register */
     pdu[1] = (uint8_t)(reg >> 8); pdu[2] = (uint8_t)reg;
     pdu[3] = (uint8_t)(p3 >> 8);  pdu[4] = (uint8_t)p3;
-    rl = app_mb_transact((uint8_t)addr, pdu, 5U, rsp, 1U);
+    rl = app_mb_transact((uint8_t)addr, pdu, 5U, rsp, sizeof(rsp), 1U);
     if (rl == 0U)            { snprintf(out, cap, "mbw: no reply"); }
     else if (rsp[0] & 0x80U) { snprintf(out, cap, "mbw: exception %u", (unsigned)rsp[1]); }
     else                     { snprintf(out, cap, "mbw ok [0x%04lX]=%lu", reg, p3); }
@@ -65,7 +68,7 @@ void app_mb_reg_str(char rw, const char *args, char *out, uint16_t cap)
     uint16_t qty = (p3 == 0UL) ? 1U : (p3 > 16UL) ? 16U : (uint16_t)p3;
     uint16_t regs[16];
     int pl = mb_req_read(pdu, MB_FC_READ_HOLD, (uint16_t)reg, qty);
-    uint16_t rl = app_mb_transact((uint8_t)addr, pdu, (uint16_t)pl, rsp, 1U);
+    uint16_t rl = app_mb_transact((uint8_t)addr, pdu, (uint16_t)pl, rsp, sizeof(rsp), 1U);
     if (rl == 0U)       { snprintf(out, cap, "mbr: no reply"); return; }
     if (rsp[0] & 0x80U) { snprintf(out, cap, "mbr: exception %u", (unsigned)rsp[1]); return; }
     if (mb_rsp_regs(rsp, rl, MB_FC_READ_HOLD, regs, qty) != (int)qty) { snprintf(out, cap, "mbr: bad reply"); return; }
@@ -113,9 +116,9 @@ void app_mb_bus_status(void)
 
 /* public transaction entry (used by app_mota streaming; same semantics as master_transact) */
 uint16_t app_mb_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                         uint8_t *rsp_pdu, uint8_t expect_rsp)
+                         uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp)
 {
-  return master_transact(addr, pdu, pn, rsp_pdu, expect_rsp);
+  return master_transact(addr, pdu, pn, rsp_pdu, rsp_cap, expect_rsp);
 }
 
 /* ---- feed time to M4 (mqtt main loop every 10s): M4 broadcasts it onto the bus on receipt (contract §5) ---- */
@@ -171,7 +174,7 @@ static int speed_ident_ok(void)
   uint8_t pdu[8], rsp[MB_PDU_MAX];
   uint16_t regs[4] = {0};
   int n = mb_req_read(pdu, MB_FC_READ_INPUT, 0, 4);
-  uint16_t rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+  uint16_t rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
   return ((rl > 0U) && (mb_rsp_regs(rsp, rl, MB_FC_READ_INPUT, regs, 4) == 4)
           && (regs[0] == 1U) && (regs[1] == 1U)) ? 1 : 0;
 }
@@ -195,7 +198,7 @@ void app_mb_speed_sweep(void)
     uint8_t pdu[16], rsp[MB_PDU_MAX];
     uint16_t one = code;
     int n = mb_req_write_regs(pdu, 0x0011, 1, &one);
-    uint16_t rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);   /* slave switches first (ACK at old rate) */
+    uint16_t rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);   /* slave switches first (ACK at old rate) */
     if (rl == 0U)
     {
       printf("  %7lubps: slave switch NO-ACK, skip\n\r", (unsigned long)s_baud_disp[code]);
@@ -219,7 +222,7 @@ void app_mb_speed_sweep(void)
     uint8_t pdu[16], rsp[MB_PDU_MAX];
     uint16_t zero = 0;
     int n = mb_req_write_regs(pdu, 0x0011, 1, &zero);
-    (void)master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    (void)master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     (void)speed_set_master(0);
     HAL_Delay(60);
     printf("mbspeed done, back @1M: ident %s\n\r", speed_ident_ok() ? "OK" : "**FAIL**");
@@ -240,17 +243,17 @@ void app_mbx_run(void)
   {
     uint16_t regs[4] = {0};
     int n = mb_req_read(pdu, MB_FC_READ_INPUT, 0, 4);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("ident(FC04 0x0000..3)", (rl > 0U) && (mb_rsp_regs(rsp, rl, MB_FC_READ_INPUT, regs, 4) == 4)
                                   && (regs[0] == 1U) && (regs[1] == 1U));
   }
   {
     uint8_t bits[2] = { 0xA5, 0x5A }, back[2] = {0};
     int n = mb_req_write_coils(pdu, 0, 16, bits);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("write coils(FC15)", (rl > 0U) && (mb_rsp_write_ok(rsp, rl, MB_FC_WRITE_COILS, 0, 16) == 0));
     n = mb_req_read(pdu, MB_FC_READ_COILS, 0, 16);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("readback coils(FC01)", (rl > 0U) && (mb_rsp_bits(rsp, rl, MB_FC_READ_COILS, back, 2) == 2)
                                  && (back[0] == 0xA5U) && (back[1] == 0x5AU));
   }
@@ -259,22 +262,22 @@ void app_mbx_run(void)
     uint16_t t[3] = { (uint16_t)(now >> 16), (uint16_t)(now & 0xFFFFU), 0 };
     uint16_t back[3] = {0};
     int n = mb_req_write_regs(pdu, 0, 3, t);
-    rl = master_transact(MB_ADDR_BCAST, pdu, (uint16_t)n, rsp, 0);
+    rl = master_transact(MB_ADDR_BCAST, pdu, (uint16_t)n, rsp, sizeof(rsp), 0);
     STEP("time bcast no-response", rl == 0U);
     n = mb_req_read(pdu, MB_FC_READ_HOLD, 0, 3);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("time readback(FC03)", (rl > 0U) && (mb_rsp_regs(rsp, rl, MB_FC_READ_HOLD, back, 3) == 3)
                                 && (back[0] == t[0]) && (back[1] == t[1]));
   }
   {
     int n = mb_req_read(pdu, MB_FC_READ_INPUT, 0, 1);
-    rl = master_transact(9, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(9, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("absent addr timeout", rl == 0U);
   }
   {
     uint16_t regs[8] = {0};
     int n = mb_req_read(pdu, MB_FC_READ_INPUT, 0, 8);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     uint16_t errs_before = (rl > 0U) ? ((mb_rsp_regs(rsp, rl, MB_FC_READ_INPUT, regs, 8) == 8) ? regs[6] : 0xFFFFU) : 0xFFFFU;
     static uint8_t evil[16];
     n = mb_adu_build(evil, sizeof(evil), SLAVE_ADDR, pdu, 5);
@@ -283,21 +286,21 @@ void app_mbx_run(void)
       raw[0] = 0x02U; memcpy(&raw[1], evil, (size_t)n);
       app_rpc_transact(raw, (uint16_t)(n + 1), ack, sizeof(ack), 150); }
     n = mb_req_read(pdu, MB_FC_READ_INPUT, 0, 8);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     uint16_t errs_after = (rl > 0U) ? ((mb_rsp_regs(rsp, rl, MB_FC_READ_INPUT, regs, 8) == 8) ? regs[6] : 0U) : 0U;
     STEP("bad-CRC ignored+counted", (errs_before != 0xFFFFU) && (errs_after == (uint16_t)(errs_before + 1U)));
   }
   {
     uint8_t ex = 0;
     int n = mb_req_read(pdu, MB_FC_READ_COILS, 10, 10);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("exception(ILLEGAL_ADDR)", (rl > 0U) && (mb_rsp_is_exception(rsp, rl, &ex) == 1)
                                     && (ex == MB_EXC_ILLEGAL_ADDR));
   }
   {
     uint8_t zeros[2] = { 0, 0 };                  /* wrap-up: zero the real relays (16O is live ammo) */
     int n = mb_req_write_coils(pdu, 0, 16, zeros);
-    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, 1);
+    rl = master_transact(SLAVE_ADDR, pdu, (uint16_t)n, rsp, sizeof(rsp), 1);
     STEP("coils cleanup(all off)", (rl > 0U) && (mb_rsp_write_ok(rsp, rl, MB_FC_WRITE_COILS, 0, 16) == 0));
   }
   printf("mbx result: %d/%d %s (via CM4)\n\r", pass, total,

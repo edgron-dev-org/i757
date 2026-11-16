@@ -191,6 +191,19 @@ static const char  *s_tal_name[TAL_N] = { "overflow", "fill", "verify", "runoff"
 
 ferti_sys_t *ferti_first(void) { return s_n ? s_sys[0] : NULL; }
 uint8_t ferti_count(void) { return s_n; }
+
+int ferti_owns_coil(uint16_t pt, uint8_t ch)
+{
+  for (uint8_t k = 0; k < s_n; k++)
+  {
+    const ferti_bind_t *b = s_sys[k]->b;
+    const ferti_pin_t own[] = { b->pump[0], b->pump[1], b->pump[2], b->pump[3], b->fill, b->stir, b->irr, b->circ, b->air };
+    _Static_assert(FERTI_PUMPS == 4U, "ferti_owns_coil lists four pumps");
+    for (uint8_t i = 0; i < (uint8_t)(sizeof(own) / sizeof(own[0])); i++)
+    { if ((own[i].pt == pt) && (own[i].ch == ch)) { return 1; } }
+  }
+  return 0;
+}
 ferti_sys_t *ferti_by_name(const char *name, int len)
 {
   for (uint8_t k = 0; k < s_n; k++)
@@ -515,8 +528,12 @@ static void pump_assert(ferti_sys_t *s)       /* every tick, corrects stray writ
 
 static int shot_queue(ferti_sys_t *s, uint8_t pump, uint16_t ml, const char *src, const char *why)
 {
-  if (s->qn >= QLEN) { return -1; }
+  /* The queue is shared between this instance's task and the command context (console / MQTT):
+   * every edit of q/qn/run is done inside a critical section (2026-11-17, review P5). */
+  taskENTER_CRITICAL();
+  if (s->qn >= QLEN) { taskEXIT_CRITICAL(); return -1; }
   s->q[s->qn].pump = pump; s->q[s->qn].ml = ml; s->qn++;
+  taskEXIT_CRITICAL();
   if (strcmp(src, "auto") != 0) { s->confound = 1U; }   /* hand shots are not the model's doing */
   evs("ACTION", src, "%s %s %uml (%lus) %s ec=%u ph=%u", s->tag, pump_name(s, pump), (unsigned)ml,
       (unsigned long)(ml * 60UL / s->p.mlmin[pump]), why, (unsigned)s->ec, (unsigned)s->ph);
@@ -525,7 +542,8 @@ static int shot_queue(ferti_sys_t *s, uint8_t pump, uint16_t ml, const char *src
 
 static void shot_start_next(ferti_sys_t *s)
 {
-  if ((s->run >= 0) || (s->qn == 0U)) { return; }
+  taskENTER_CRITICAL();                   /* a stop/off from the command context must not land between the check and the pop */
+  if ((s->run >= 0) || (s->qn == 0U)) { taskEXIT_CRITICAL(); return; }
   s->run    = (int8_t)s->q[0].pump;
   s->run_ms = (uint32_t)s->q[0].ml * 60000UL / s->p.mlmin[s->q[0].pump];
   {                                       /* count what was commanded (caps err on the safe side) */
@@ -534,9 +552,15 @@ static void shot_start_next(ferti_sys_t *s)
   }
   memmove(&s->q[0], &s->q[1], sizeof(s->q) - sizeof(s->q[0]));
   s->qn--;
+  taskEXIT_CRITICAL();
 }
 
-static void shots_abort(ferti_sys_t *s) { s->run = -1; s->run_ms = 0; s->qn = 0; }
+static void shots_abort(ferti_sys_t *s)
+{
+  taskENTER_CRITICAL();
+  s->run = -1; s->run_ms = 0; s->qn = 0;
+  taskEXIT_CRITICAL();
+}
 
 /* ---- 24 h caps (rolling) + cloud alarms ---- */
 static uint32_t ml_24h(const ferti_sys_t *s, uint8_t pump)
@@ -1116,7 +1140,9 @@ static void chem_tick(ferti_sys_t *s)
     if ((s->mode == M_AUTO) && !s->flowhold) { topup_poll(s); }   /* after the readings above are fresh */
     else { topup_reset(s); }              /* off/hold: water that came in then is not ours to replace */
   }
-  if (s->mode != M_RELEASE) { pump_assert(s); }
+  if (s->mode != M_RELEASE) { s->rel_done = 0U; pump_assert(s); }
+  else if (!s->rel_done)                  /* entering release: drop our coils once (a shot may have been running), then hands off */
+  { s->rel_done = 1U; pump_assert(s); }
 }
 
 /* ================= hydraulics (bindings with a fill pin) ================= */

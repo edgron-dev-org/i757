@@ -160,7 +160,7 @@ it, so a single reset pinned the count at 0 forever — the W1C bit must self-cl
 
 ## Bench commands (2026-09-03, app_user.c; identical over cloud `dn/cmd` and the USB console)
 
-- `pulse <coil 4..16> [Hz]` / `pulse off`: a dedicated 1 ms task toggles the relay (half period = 500/Hz ms); while active the relay scan row runs at 1 ms, `off` restores 50 ms. Measured: the GAQW212 PhotoMOS relay makes a clean 100 Hz square wave (scope 100.0 Hz / 24 Vpp; Ton 2.7..3.2 ms caps it near 150 Hz); over a 5-minute window four channels (2 hardware + 2 polled/interrupt/capture) matched the source pulse for pulse.
+- `pulse <coil 1..16> [Hz]` / `pulse off` (refused for any coil a fertigation instance is bound to: dosing pump, stir, irrigation or fill): a dedicated 1 ms task toggles the relay (half period = 500/Hz ms); while active the relay scan row runs at 1 ms, `off` restores 50 ms. Measured: the GAQW212 PhotoMOS relay makes a clean 100 Hz square wave (scope 100.0 Hz / 24 Vpp; Ton 2.7..3.2 ms caps it near 150 Hz); over a 5-minute window four channels (2 hardware + 2 polled/interrupt/capture) matched the source pulse for pulse.
 - `pulse sw <EXTI line> <Hz>` (0 Hz = off): the CM4 fires that EXTI line from software (`EXTI->SWIER1`) in its 1 ms poll, ≤1 kHz, no wiring — exercises the software-counter interrupt path (RPC op 0x13).
 - `hsdi <0..7> off|di|hw [icf]|poll`: re-mode one channel at run time (same validator as at boot; a rejected table is restored).
 - `hsdi <ch> cap [icf] [min_us]` (defaults icf 15, min_us 1000) / `hsdi <ch> sw [min_us]` (default 0 = every edge counts): re-mode with parameters.

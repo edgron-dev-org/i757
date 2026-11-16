@@ -306,6 +306,7 @@ static uint32_t s_hdr_fill;
 static uint8_t  s_msg_bad;             /* discard this message (bad header / ring full / duplicate block) */
 static uint32_t s_prod_dst;
 static uint32_t s_msg_total;           /* this message's total length (including 8B header) */
+static uint32_t s_msg_left;            /* payload bytes this message may still deliver (bounds every flash write) */
 /* consumer (task) state */
 static uint8_t  s_wbuf[OTA_WORD];
 static uint32_t s_wfill, s_cons_dst;
@@ -377,7 +378,14 @@ void ota_fw_chunk(const uint8_t *data, uint16_t len, uint8_t last)
       uint32_t off, gidx;
       if (memcmp(s_hdr, "OTA1", 4) != 0) { s_msg_bad = 1; return; }
       off = (uint32_t)s_hdr[4] | ((uint32_t)s_hdr[5] << 8) | ((uint32_t)s_hdr[6] << 16) | ((uint32_t)s_hdr[7] << 24);
-      if (((off & (OTA_WORD - 1U)) != 0U) || (s_offset + off >= OTA_BANK_SIZE)) { s_msg_bad = 1; return; }
+      /* The block must lie wholly inside the segment declared by ota-begin. Without this bound a
+       * block could land on the confirm word / footer at the bank tail and fake "signature verified". */
+      if (((off & (OTA_WORD - 1U)) != 0U) || (s_msg_total <= 8U) || (off >= s_size) ||
+          ((s_msg_total - 8U) > (s_size - off)))
+      {
+        s_msg_bad = 1;
+        return;
+      }
       gidx = (s_offset + off) >> OTA_CHUNK_SHIFT;        /* block number (granularity see OTA_CHUNK_SHIFT) */
       if ((s_chunk_map[gidx >> 3] & (1U << (gidx & 7U))) != 0U)
       {
@@ -391,10 +399,13 @@ void ota_fw_chunk(const uint8_t *data, uint16_t len, uint8_t last)
       }
       s_chunk_map[gidx >> 3] |= (uint8_t)(1U << (gidx & 7U));   /* accept: mark immediately (the ring won't lose accepted data) */
       s_prod_dst = OTA_WIN_BASE + s_offset + off;
+      s_msg_left = s_msg_total - 8U;
       s_st = OTA_RECV;
     }
   }
   if (len == 0U) { return; }
+  if (len > s_msg_left) { s_msg_bad = 1; return; }   /* more payload than the message announced: never write past the checked range */
+  s_msg_left -= len;
   rec_hdr_t rh = { s_prod_dst, len, REC_MAGIC };
   ring_push((const uint8_t *)&rh, sizeof(rh));
   ring_push(data, len);

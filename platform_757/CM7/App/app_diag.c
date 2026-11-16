@@ -449,7 +449,7 @@ static uint8_t ai8_refresh_types(mod_ident_t *m)
   uint16_t t[8];
   uint8_t changed = 0;
   int ql = mb_req_read(q, MB_FC_READ_HOLD, AI8_TYPE_BASE, 8U);
-  uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+  uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
   if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_HOLD, t, 8U) != 8)) { return 0; }
   for (uint8_t k = 0; k < 8U; k++)
   {
@@ -497,7 +497,7 @@ static void mods_reident(uint16_t bitmap)
     uint16_t regs[3] = { 0, 0, 0 };
     if ((bitmap & (1U << (a - 1U))) == 0U) { continue; }
     int ql = mb_req_read(q, MB_FC_READ_INPUT, 0, 3);   /* map_ver/type/fw */
-    uint16_t rl = app_mb_transact(a, q, (uint16_t)ql, r, 1);
+    uint16_t rl = app_mb_transact(a, q, (uint16_t)ql, r, sizeof(r), 1);
     if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, regs, 3) != 3)) { continue; }
     s_mods[s_nmods].addr = a;
     s_mods[s_nmods].type = regs[1];
@@ -514,7 +514,7 @@ static void mtsk_one(const mod_ident_t *m, char *out, uint16_t cap, uint16_t *n)
   uint8_t q[8], r[160];
   uint16_t hdr[3];
   int ql = mb_req_read(q, MB_FC_READ_INPUT, 0x0300, 3);
-  uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+  uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
   if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, hdr, 3) != 3) || (hdr[0] == 0U) || (hdr[0] > 8U))
   {
     *n += (uint16_t)snprintf(&out[*n], (size_t)(cap - *n), ",\"m%utsk\":\"-\"", (unsigned)m->addr);
@@ -526,7 +526,7 @@ static void mtsk_one(const mod_ident_t *m, char *out, uint16_t cap, uint16_t *n)
   {
     static uint16_t slots[64];
     ql = mb_req_read(q, MB_FC_READ_INPUT, 0x0308, (uint16_t)(hdr[0] * 8U));
-    rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+    rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
     if ((rl > 0U) && (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, slots, (uint16_t)(hdr[0] * 8U)) == (int)(hdr[0] * 8U)))
     {
       for (uint16_t k = 0; k < hdr[0]; k++)
@@ -578,14 +578,14 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
       uint8_t bits[2];
       uint16_t c[32];
       int ql = mb_req_read(qd, MB_FC_READ_DISC, 0, 16U);
-      uint16_t rl = app_mb_transact(m->addr, qd, (uint16_t)ql, rd, 1);
+      uint16_t rl = app_mb_transact(m->addr, qd, (uint16_t)ql, rd, sizeof(rd), 1);
       if ((rl > 0U) && (mb_rsp_bits(rd, rl, MB_FC_READ_DISC, bits, 2U) == 2))
       {
         n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%udi\":%u",
                                 (unsigned)m->addr, (unsigned)(bits[0] | ((uint16_t)bits[1] << 8)));
       }
       ql = mb_req_read(qd, MB_FC_READ_INPUT, DI16_CNT_BASE, 32U);
-      rl = app_mb_transact(m->addr, qd, (uint16_t)ql, rd, 1);
+      rl = app_mb_transact(m->addr, qd, (uint16_t)ql, rd, sizeof(rd), 1);
       if ((rl > 0U) && (mb_rsp_regs(rd, rl, MB_FC_READ_INPUT, c, 32U) == 32))
       {
         for (uint8_t k = 0; (k < 16U) && (n < cap); k++)
@@ -603,7 +603,7 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
       uint8_t qa[8], ra[24];
       uint16_t v9[9];
       int ql = mb_req_read(qa, MB_FC_READ_INPUT, 0x0108U, 9U);
-      uint16_t rl = app_mb_transact(m->addr, qa, (uint16_t)ql, ra, 1);
+      uint16_t rl = app_mb_transact(m->addr, qa, (uint16_t)ql, ra, sizeof(ra), 1);
       if ((rl > 0U) && (mb_rsp_regs(ra, rl, MB_FC_READ_INPUT, v9, 9U) == 9))
       {
         for (uint8_t k = 0; (k < 8U) && (n < cap); k++)
@@ -624,7 +624,7 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
     }
     if (m->type != MOD_TYPE_PH_EC) { continue; }
     int ql = mb_req_read(q, MB_FC_READ_INPUT, PHEC_ENG_BASE, 8U);
-    uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+    uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
     if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, v, 8U) != 8)) { continue; }
     for (uint8_t k = 0; (k < 8U) && (n < cap); k++)
     {
@@ -656,7 +656,7 @@ uint8_t app_diag_di_changed(void)
     uint8_t q[8], r[16], bits[2];
     if (m->type != MOD_TYPE_EX_16DI) { continue; }
     int ql = mb_req_read(q, MB_FC_READ_DISC, 0, 16U);
-    uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, 1);
+    uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
     if ((rl == 0U) || (mb_rsp_bits(r, rl, MB_FC_READ_DISC, bits, 2U) != 2)) { continue; }
     {
       uint16_t bm = (uint16_t)(bits[0] | ((uint16_t)bits[1] << 8));

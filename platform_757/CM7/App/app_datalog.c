@@ -477,7 +477,7 @@ static void dl_subsample(void)
     {
       uint16_t v[8];
       int ql = mb_req_read(q, MB_FC_READ_INPUT, 0x0108U, 8U);
-      uint16_t rl = app_mb_transact(s_slot[i].addr, q, (uint16_t)ql, r, 1U);
+      uint16_t rl = app_mb_transact(s_slot[i].addr, q, (uint16_t)ql, r, sizeof(r), 1U);
       if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, v, 8U) != 8)) { continue; }
       { /* FAULT edge detection per channel (module already debounces its published values) */
         static uint8_t s_valid[17];        /* per backplane address: bit k = channel k valid; 0 = baseline unknown */
@@ -516,7 +516,7 @@ static void dl_subsample(void)
     {
       uint16_t c[32];
       int ql = mb_req_read(q, MB_FC_READ_INPUT, 0x0200U, 32U);
-      uint16_t rl = app_mb_transact(s_slot[i].addr, q, (uint16_t)ql, r, 1U);
+      uint16_t rl = app_mb_transact(s_slot[i].addr, q, (uint16_t)ql, r, sizeof(r), 1U);
       if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, c, 32U) != 32)) { continue; }
       { uint8_t k;
         for (k = 0; k < 16U; k++)

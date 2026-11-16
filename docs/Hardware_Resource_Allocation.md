@@ -138,7 +138,7 @@ The single code source of this layout is `CM7/App/app_qflash.h`; changing the sp
 
 | Chip offset | Size | Use | Notes |
 |---|---|---|---|
-| 0x0000000 – 0x1DFFFFF | **30 MB** | **littlefs** (7680 × 4 KB blocks) | Config (mbport.cfg), staged firmware (t*.fw), application files (`app_lfs()`, manual §5.5). A superblock size change fails the first mount and auto-formats |
+| 0x0000000 – 0x1DFFFFF | **30 MB** | **littlefs** (7680 × 4 KB blocks) | Config (mbport.cfg), staged firmware (t*.fw), application files (`app_lfs()`, manual §5.5). A failed mount is retried 3 times; only a blank chip (blocks 0/1 readable and without a littlefs superblock) is auto-formatted. A chip that already carries a filesystem is left unmounted for that boot and never formatted (identity, signing key and network config live here); `lfs-format yes` on the USB console is the manual wipe. All lfs API calls are serialized by the `LFS_THREADSAFE` mutex |
 | 0x1E00000 – 0x1FFFFFF | **2 MB** | **Power-fail save area (raw page writes)** | Layer 2 of the power-fail scheme: **170 slots × 12 KB**, rotated; kept pre-erased in normal operation, only sequential page programming at end-of-life — **no erase, no file system** inside the ~39 ms dying window (iron rule); `app_pf_blackbox_set/last` (app_pwrfail.h) |
 
 **Address-selection mnemonic**: CPU-private and fast → DTCM; buffers feeding ETH/DMA1/2 → D2; two-core shared / reset-survival → SRAM4; just big → AXI; REALLY big (MB-scale, late init acceptable) → SDRAM (`APP_SDRAM`); must survive power-off (with battery) → Backup; extreme-fast code → ITCM.

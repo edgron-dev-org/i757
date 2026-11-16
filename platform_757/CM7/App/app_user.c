@@ -360,7 +360,9 @@ int app_pulse_cmd(const char *line, const char *src, char *out, uint16_t cap)
     int coil = atoi(a);
     const char *h = strchr(a, ' ');
     int hz = (h != NULL) ? atoi(h + 1) : 25;
-    if ((coil < 4) || (coil > 16)) { snprintf(out, cap, "pulse: coil 4..16 (1..3 = dosing pumps) [hz] | off"); return 1; }
+    if ((coil < 1) || (coil > 16)) { snprintf(out, cap, "pulse: coil 1..16 [hz] | off"); return 1; }
+    if (ferti_owns_coil(PT_RELAY, (uint8_t)(coil - 1)))   /* any fertigation instance's pump / stir / irrigation coil: never square-wave it */
+    { snprintf(out, cap, "pulse: O%d belongs to a fertigation system (dosing pump / stir / irrigation) - refused", coil); return 1; }
     if (hz < 1) { hz = 1; }
     if (hz > 500) { hz = 500; }
     pulse_start((uint8_t)(coil - 1), (uint16_t)(500U / (unsigned)hz));   /* half-period in ms */

@@ -21,7 +21,7 @@ void HSEM2_IRQHandler(void)   /* CM4-side HSEM interrupt */
 extern void     mbport_cm4_init(void);
 extern void     mbport_cm4_slave_service(void);
 extern uint16_t mbport_cm4_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                                    uint8_t *rsp_pdu, uint8_t expect_rsp);
+                                    uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp);
 extern void     mbport_cm4_raw_send(const uint8_t *d, uint16_t n);   /* op=2 bad-frame injection */
 extern void     mbport_cm4_time_push(uint32_t unix_s);               /* op=3 time -> broadcast */
 extern uint16_t mbport_cm4_status(uint8_t *out);                     /* op=4 scheduler status */
@@ -109,7 +109,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
   if ((len == 2U) && (d[0] == 0x11U))            /* HSDI channel signal statistics [ch] -> 11 x u32 (2026-09-03, contract v1.8) */
   {
     extern uint16_t hsdi_cm4_capstat(uint8_t ch, uint8_t *out);
-    uint8_t r[48];
+    uint8_t r[64];                               /* reply is 13 x u32 = 52 B (was r[48]: 4 B past the end) */
     uint16_t n2 = hsdi_cm4_capstat(d[1], r);
     OPENAMP_send(ept, r, (size_t)n2);
     return 0;
@@ -188,7 +188,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
   if ((len >= 4U) && (d[0] == 0x01U))            /* Modbus transaction */
   {
     static uint8_t rsp[300];
-    uint16_t rl = mbport_cm4_transact(d[1], &d[3], (uint16_t)(len - 3U), &rsp[1], d[2]);
+    uint16_t rl = mbport_cm4_transact(d[1], &d[3], (uint16_t)(len - 3U), &rsp[1], (uint16_t)(sizeof(rsp) - 1U), d[2]);
     rsp[0] = (rl > 0U) ? 0U : ((d[2] == 0U) ? 0U : 1U);   /* broadcast with no reply = normal */
     OPENAMP_send(ept, rsp, (size_t)(1U + rl));
     return 0;

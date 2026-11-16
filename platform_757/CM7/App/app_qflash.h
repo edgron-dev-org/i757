@@ -25,5 +25,6 @@ void app_qflash_dying_prep(void); /* power-fail dying preparation (ISR-usable): 
 /* LittleFS: mount (format if necessary) + boot-count file boot.cnt; returns a short string like "lfs:OK boot:N" */
 const char *app_lfs_selftest(void);
 int app_lfs_mount(void);   /* idempotent early mount (identity partition needs it before TLS init); 0=OK */
+int app_lfs_format_force(void);   /* USB console only: format a filesystem that will not mount; -1 = mounted (refused), -2 = failed */
 
 #endif

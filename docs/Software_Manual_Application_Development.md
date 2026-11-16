@@ -462,6 +462,13 @@ what order (adding interlocks / operator confirmation where appropriate).
   #include "lfs.h"
   extern lfs_t *app_lfs(void);   // returns the mounted littlefs; use standard lfs_file_* API
   ```
+  Several tasks may call the lfs API at the same time: the platform builds littlefs with
+  `LFS_THREADSAFE` and every call takes one shared mutex. Two things to keep in mind: every open
+  file needs its **own** `lfs_file_t` and 256-byte file buffer (`lfs_file_opencfg`), never share
+  them between tasks; and one sector erase can make another task's lfs call wait tens to hundreds
+  of milliseconds, so keep file I/O out of timing-critical code.
+  `app_lfs()` returns NULL when the filesystem is not mounted on this boot (see the QSPI section
+  of the Hardware Resource Allocation table); check before use.
 - **SD card / FatFs** (removable bulk, PC-readable, log/data export): platform mounts it; the
   config file `i757.cfg` is a sample.
 - Split: config/critical state → NOR; logs/data export → SD.

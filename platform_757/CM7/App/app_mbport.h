@@ -14,8 +14,9 @@ void app_mb_bus_status(void);   /* CLI 'mbus': query M4 scheduler online table /
 void app_mb_reg_cli(char rw, const char *args);  /* CLI 'mbr'/'mbw': generic slave holding-register access (config/cal 0x0200~, contract v0.28) */
 void app_mb_time_push(void);    /* mqtt main loop every 10s: feed time to M4 -> broadcast onto bus (op=3) */
 
-/* public Modbus transaction (handed to CM4 over RPMsg; used by app_mota streaming) */
+/* public Modbus transaction (handed to CM4 over RPMsg; used by app_mota streaming).
+ * rsp_cap = size of rsp_pdu; a longer reply is cut to rsp_cap bytes (return value = bytes stored). */
 uint16_t app_mb_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
-                         uint8_t *rsp_pdu, uint8_t expect_rsp);
+                         uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp);
 
 #endif
