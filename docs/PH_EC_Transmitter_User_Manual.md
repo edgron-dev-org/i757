@@ -54,7 +54,7 @@ Wiring notes:
 
 ### 4.1 Link Parameters
 
-- **Slave address**: 4-bit DIP switch, address = DIP value + 1 (1–16); address 0 = broadcast (write function codes only, executed without a reply);
+- **Slave address**: 4-bit DIP switch, address = DIP value + 1 (1–16); address 0 = broadcast (write function codes only, executed without a reply; **from firmware v0.41 writes to the configuration area 0x0200–0x02FF, including save and factory reset, are not executed on the broadcast address** — configuration and calibration must be sent to one address at a time);
 - **Serial format**: 8 data bits, no parity, 1 stop bit (8N1);
 - **Baud rate**: **4800 / 9600 (factory default) / 19200 / 38400 / 57600 / 115200 / 250K / 500K / 1M**; fixed-rate design, see 4.3 to change it;
 - **Supported function codes**: FC03 (read holding), FC04 (read input), FC06 (write single register), FC16 (write multiple registers; not used for the 0x0200 configuration area);
@@ -104,13 +104,13 @@ Baud-rate code table (shared by both registers):
 | 0x010E | Temp EC1 (row 2, optional dedicated EC1 probe; 0x7FFF when none is fitted) | °C × 10 | int16 |
 | 0x010F | Temp EC2 (= the shared EC water-temperature terminal, row 4) | °C × 10 | int16 |
 
-- **Invalid marker 0x7FFF**: a faulted or disconnected channel publishes 0x7FFF — never a stale or fabricated number. A fault is declared only after 3 s of consecutive invalid readings (configurable, §6.6); recovery is immediate;
+- **Invalid marker 0x7FFF**: a faulted or disconnected channel publishes 0x7FFF — never a stale or fabricated number. A fault is declared only after 3 s of consecutive invalid readings (configurable, §6.6); recovery is immediate. **Firmware v0.41 and later**: a pH channel whose ADC stops converting or loses its configuration also publishes 0x7FFF and raises its fault; the module retries the ADC automatically every 30 s;
 - Published values are smoothed (median + damping, default 2 s, configurable); the unfiltered instantaneous values are available at 0x0290–0x0297 (FC03) for diagnostics;
 - 0x0100–0x0107 is a factory diagnostic area; not needed in normal use.
 
 ## 6. Configuration and Calibration (FC03 read / FC06 write, 0x0200 area)
 
-**General rule**: writes take effect immediately but are not persisted; writing **0xA55A to 0x0200 saves to flash** (survives power cycles). Writing 0x0F0F restores factory defaults (RAM only; save again to persist). Status register 0x0201: bit0 = unsaved changes, bit1 = valid flash copy exists, bit2 = last save succeeded.
+**General rule**: writes take effect immediately but are not persisted; writing **0xA55A to 0x0200 saves to flash** (survives power cycles; from firmware v0.41 a save with no changed value does not erase or write the flash, so the command is safe to repeat). Writing 0x0F0F restores factory defaults (RAM only; save again to persist). Status register 0x0201: bit0 = unsaved changes, bit1 = valid flash copy exists, bit2 = last save succeeded.
 
 ### 6.1 Temperature Channels (n = 0..3 → PH1 / PH2 / EC1 / EC shared, base 0x0210 + 8n; the shared EC channel is n = 3 at 0x0228)
 
@@ -127,7 +127,7 @@ Baud-rate code table (shared by both registers):
 
 | Offset | Name | Description |
 |---|---|---|
-| +0 | ZERO | Electrode zero, 0.1 mV, int16 (calibration product; experts may write directly) |
+| +0 | ZERO | Electrode zero, 0.1 mV, int16 (calibration product; experts may write directly; from firmware v0.41 a direct write is limited to ±200.0 mV, anything beyond is rejected) |
 | +1 | SLOPE | Electrode slope, 0.1% (1000 = 100.0%; 90–105% = healthy electrode) |
 | +2 | CAL_A | Two-point calibration, first point: with the probe settled in buffer A, write its pH × 100 (e.g. 686) |
 | +3 | CAL_B | Second point: switch to buffer B (≥ 1 pH away from A), write its pH × 100 → zero + slope are solved |
@@ -141,7 +141,7 @@ Baud-rate code table (shared by both registers):
 | Offset | Name | Description |
 |---|---|---|
 | +0 | K | Cell constant, units of 0.001/cm (1000 = K 1.000; the probe's nameplate value may be written directly) |
-| +1 | TCOEF | Temperature coefficient, 0.01%/°C (default 2.00%/°C; KCl standards ≈ 1.9, nutrient solutions 1.9–2.2; 0 = compensation off) |
+| +1 | TCOEF | Temperature coefficient, 0.01%/°C (default 2.00%/°C; KCl standards ≈ 1.9, nutrient solutions 1.9–2.2; 0 = compensation off). **Firmware v0.41 and later**: when compensation is on but no valid compensation temperature is available, EC is still published uncompensated and the channel **raises its fault bit and blinks its LED** (at 15 °C the uncompensated value reads about 20 % low). If you do not want compensation, write TCOEF = 0 or TSRC = 0xFE |
 | +2 | CAL | **One-touch calibration**: with the probe settled in a standard solution, write the solution's 25 °C nominal value in µS/cm (e.g. 1413) → K is solved automatically |
 | +5 | TSRC | Compensation source: as §6.2 (default auto = the shared EC temperature); see §6.4 |
 | +6/+7 | (factory) | Factory electronics calibration — **do not modify** |

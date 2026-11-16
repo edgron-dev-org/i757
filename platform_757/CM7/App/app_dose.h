@@ -15,12 +15,13 @@
  *   dose a|b|acid|base <ml>  -> manual timed shot (flow calibration applies)
  *   dose ab <ml>         -> A then B sequentially, <ml> each (the equal-parts SOP)
  *   dose stop            -> stop pumps now, clear queue, mode -> off
- *   dose auto            -> closed loop ON (feed-forward + proportional, self-learning: see .c)
+ *   dose auto            -> closed loop ON (feed-forward + proportional, self-learning: see .c); does NOT clear the 24 h usage record
  *   dose off             -> closed loop off; pumps held OFF
  *   dose release         -> release the four coils to the dashboard
  *   dose cal a|b|acid|base <ml_per_min>   -> pump flow calibration
  *   dose ec <uS> [db] | dose ph <x100> [db] | dose mix <min>  -> targets, decision cycle
  *   dose shot acid|base <ml>              -> per-cycle auto shot caps
+ *   dose cap ab|acid|base <ml> | clear    -> rolling 24 h caps; `clear` zeroes the usage record (operator override after a cap hold)
  *   dose tank <L>        -> reservoir volume for the top-up feed-forward (water meter -> A/B while filling)
  *   dose learn [reset]   -> learned gains/drifts (persisted in littlefs "dose.lrn")
  *   dose topup <L> | batch <L> | fill <s> | stir <s> | verify <n> | irr ... | runoff <s> | tz <min> | ack

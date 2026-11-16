@@ -68,6 +68,7 @@ typedef struct {
   uint32_t hw_errs;                  /* ORE/FE/NE/PE hardware errors */
   uint32_t tx_reject;                /* count of transmits rejected while busy */
   uint32_t rearm_fail;               /* uart_heal re-arm attempts the HAL refused (each = one near-permanent RX death before 2026-08-22 fix) */
+  uint32_t tx_stuck;                 /* transmits whose completion never came (DMA error / aborted mid-frame): tx_busy force-cleared by the TX watchdog */
 } uart_stats_t;
 
 typedef struct { uint16_t off, len; } uart_frame_desc_t;
@@ -87,6 +88,8 @@ typedef struct {
   uart_frame_desc_t   fring[16];     /* frame descriptor ring */
   volatile uint8_t    f_wr, f_rd;
   volatile uint8_t    tx_busy;
+  uint16_t            tx_budget_ms;  /* wire time of the frame in flight + margin: past it the TX watchdog force-clears tx_busy */
+  uint32_t            tx_t0;         /* HAL tick when the frame in flight was started */
   volatile uint8_t    rx_dead;       /* receive aborted after error, awaiting uart_heal */
   uint8_t             heal_tries;    /* consecutive failed heals: drives the escalation ladder (re-arm -> abort -> re-init) */
   uart_stats_t        stats;

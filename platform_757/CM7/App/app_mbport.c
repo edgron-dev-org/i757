@@ -18,15 +18,25 @@
 static uint16_t master_transact(uint8_t addr, const uint8_t *pdu, uint16_t pn,
                                 uint8_t *rsp_pdu, uint16_t rsp_cap, uint8_t expect_rsp)
 {
+  /* req/rsp are shared statics (600 B is too much for small task stacks), so the whole
+   * fill -> transact -> copy-out sequence runs under the RPC link lock. Before 2026-11-17 only the
+   * transaction itself was locked: a higher-priority caller could overwrite a lower-priority
+   * caller's request or reply, and two tasks reading two modules could get each other's data. */
   static uint8_t req[300], rsp[300];
+  extern void app_rpc_lock(void);
+  extern void app_rpc_unlock(void);
+  extern uint16_t app_rpc_transact_locked(const uint8_t *q, uint16_t len, uint8_t *r, uint16_t cap, uint32_t timeout_ms);
+  uint16_t r;
   if (pn > MB_PDU_MAX) { return 0; }
+  app_rpc_lock();
   req[0] = 0x01U; req[1] = addr; req[2] = expect_rsp;
   memcpy(&req[3], pdu, pn);
-  uint16_t r = app_rpc_transact(req, (uint16_t)(3U + pn), rsp, sizeof(rsp), 150);
-  if ((r < 1U) || (rsp[0] != 0U) || (expect_rsp == 0U)) { return 0; }
+  r = app_rpc_transact_locked(req, (uint16_t)(3U + pn), rsp, sizeof(rsp), 150);
+  if ((r < 1U) || (rsp[0] != 0U) || (expect_rsp == 0U)) { app_rpc_unlock(); return 0; }
   r = (uint16_t)(r - 1U);
   if (r > rsp_cap) { r = rsp_cap; }             /* never write past the caller's buffer (a long or late reply is cut to rsp_cap) */
   memcpy(rsp_pdu, &rsp[1], (size_t)r);
+  app_rpc_unlock();
   return r;
 }
 
@@ -74,7 +84,7 @@ void app_mb_reg_str(char rw, const char *args, char *out, uint16_t cap)
     if (mb_rsp_regs(rsp, rl, MB_FC_READ_HOLD, regs, qty) != (int)qty) { snprintf(out, cap, "mbr: bad reply"); return; }
     for (uint16_t i = 0; (i < qty) && (n < cap); i++)
     {
-      n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), "%s[0x%04lX]=0x%04X/%d",
+      n = app_sncat(out, (uint16_t)n, cap, "%s[0x%04lX]=0x%04X/%d",
                               (i > 0U) ? " " : "", reg + i, (unsigned)regs[i], (int)(int16_t)regs[i]);
     }
   }

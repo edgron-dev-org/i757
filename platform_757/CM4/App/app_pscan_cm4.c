@@ -79,6 +79,21 @@ static int entry_valid(const pimg_entry_t *e)
   if (e->period == 0U) { return 0; }
   if (e->seq_idx >= PIMG_MAX_ENTRIES) { return 0; }
   if (e->count == 0U) { return 0; }
+  /* Modbus per-request limits. service_entry() copies the slice into fixed work buffers sized by
+   * these limits before the request builder gets a chance to refuse it, so an oversized entry
+   * (e.g. a 124..128-register output) must never reach it. */
+  switch (e->access)
+  {
+    case PIMG_IN_COILS: case PIMG_IN_DISCRETE:
+      if (e->count > MB_MAX_READ_BITS) { return 0; }
+      break;
+    case PIMG_OUT_COILS:
+      if (e->count > MB_MAX_WRITE_BITS) { return 0; }
+      break;
+    default:
+      if (e->count > ((e->access <= PIMG_IN_HOLDING) ? MB_MAX_READ_REGS : MB_MAX_WRITE_REGS)) { return 0; }
+      break;
+  }
   if (e->access <= PIMG_IN_HOLDING)                  /* input access -> input image */
   {
     return ((uint32_t)e->img_off + nb) <= PIMG_IN_BYTES;

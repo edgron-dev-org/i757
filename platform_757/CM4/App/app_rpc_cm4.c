@@ -38,11 +38,27 @@ extern uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
                                  uint8_t *rsp_pdu, uint8_t *status);
 extern uint16_t mbfront_stats(uint8_t port, uint8_t *out);
 
+/* Transaction tag (protocol v1.10, 2026-11-17): every CM7 message starts with one sequence byte and
+ * every reply echoes it in front of the reply body. CM7 drops a reply whose tag is not the one it
+ * is waiting for - before this a reply that arrived after its own transaction had timed out was
+ * taken as the answer to the NEXT request (an `mbr` printing the previous module's registers). */
+static uint8_t s_req_seq;
+static void rpc_reply(struct rpmsg_endpoint *ept, const void *p, size_t n)
+{
+  static uint8_t b[496];                         /* RPMsg payload limit (512 - 16 B header) */
+  if (n > (sizeof(b) - 1U)) { n = sizeof(b) - 1U; }
+  b[0] = s_req_seq;
+  memcpy(&b[1], p, n);
+  OPENAMP_send(ept, b, (int)(n + 1U));
+}
+
 static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
                        uint32_t src, void *priv)
 {
   (void)src; (void)priv;
   uint8_t *d = (uint8_t *)data;
+  if (len < 2U) { return 0; }                    /* tag + op at least */
+  s_req_seq = d[0]; d++; len--;                  /* strip the tag: everything below sees the v1.8 layout */
   if ((len >= 5U) && (d[0] == 0x03U))            /* time feed -> broadcast; v1.3 may carry [temp i16][flags u16] to feed the board-level map */
   {
     uint8_t ok = 0;
@@ -54,14 +70,14 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
                          (uint16_t)d[7] | ((uint16_t)d[8] << 8));
     }
     else { mbfront_board_feed(t, 0, 0); }
-    OPENAMP_send(ept, &ok, 1);
+    rpc_reply(ept, &ok, 1);
     return 0;
   }
   if ((len == 10U) && (d[0] == 0x08U))           /* front-panel port configuration (contract v1.3) */
   {
     uint32_t baud = (uint32_t)d[3] | ((uint32_t)d[4] << 8) | ((uint32_t)d[5] << 16) | ((uint32_t)d[6] << 24);
     uint8_t st = (uint8_t)mbfront_cfg_set(d[1], d[2], baud, d[7], d[8], d[9]);
-    OPENAMP_send(ept, &st, 1);
+    rpc_reply(ept, &st, 1);
     return 0;
   }
   if ((len >= 2U) && (d[0] == 0x09U))            /* this board's slave-map adjudication (TCP shell) */
@@ -69,7 +85,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     static uint8_t rsp9[300];
     uint16_t rl = mbfront_slave_pdu(&d[1], (uint16_t)(len - 1U), &rsp9[1]);
     rsp9[0] = 0;
-    OPENAMP_send(ept, rsp9, (size_t)(1U + rl));
+    rpc_reply(ept, rsp9, (size_t)(1U + rl));
     return 0;
   }
   if ((len >= 7U) && (d[0] == 0x0AU))            /* front-panel master-port transaction */
@@ -79,7 +95,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     uint16_t to = (uint16_t)d[4] | ((uint16_t)d[5] << 8);
     uint16_t rl = mbfront_transact(d[1], d[2], d[3], to, 0U, &d[6], (uint16_t)(len - 6U), &rspA[1], &st);
     rspA[0] = st;
-    OPENAMP_send(ept, rspA, (size_t)(1U + rl));
+    rpc_reply(ept, rspA, (size_t)(1U + rl));
     return 0;
   }
   if ((len == 2U) && (d[0] == 0x0BU))            /* front-panel port statistics */
@@ -87,7 +103,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     uint8_t st[40];                              /* reply is 10 x u32 — sizing this at 20 smashed
                                                   * the rpc thread's frame on every 'mbstat' */
     uint16_t n2 = mbfront_stats(d[1], st);
-    OPENAMP_send(ept, st, (size_t)n2);
+    rpc_reply(ept, st, (size_t)n2);
     return 0;
   }
   if ((len == 1U) && (d[0] == 0x0EU))            /* FreeRTOS own run-time stats table (text) */
@@ -95,7 +111,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     extern uint16_t diag_cm4_runstats(uint8_t *out, uint16_t cap);
     static uint8_t rspE[460];
     uint16_t n2 = diag_cm4_runstats(rspE, sizeof(rspE));
-    OPENAMP_send(ept, rspE, (size_t)n2);
+    rpc_reply(ept, rspE, (size_t)n2);
     return 0;
   }
   if ((len == 1U) && (d[0] == 0x0DU))            /* CM4 self-report: tasks / stacks / heap (v1.5) */
@@ -103,7 +119,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     extern uint16_t diag_cm4_tasks(uint8_t *out);
     static uint8_t rspD[400];
     uint16_t n2 = diag_cm4_tasks(rspD);
-    OPENAMP_send(ept, rspD, (size_t)n2);
+    rpc_reply(ept, rspD, (size_t)n2);
     return 0;
   }
   if ((len == 2U) && (d[0] == 0x11U))            /* HSDI channel signal statistics [ch] -> 11 x u32 (2026-09-03, contract v1.8) */
@@ -111,7 +127,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     extern uint16_t hsdi_cm4_capstat(uint8_t ch, uint8_t *out);
     uint8_t r[64];                               /* reply is 13 x u32 = 52 B (was r[48]: 4 B past the end) */
     uint16_t n2 = hsdi_cm4_capstat(d[1], r);
-    OPENAMP_send(ept, r, (size_t)n2);
+    rpc_reply(ept, r, (size_t)n2);
     return 0;
   }
   if ((len >= 2U) && (d[0] == 0x12U))            /* HSDI edge recorder (2026-09-04, contract v1.8): sub 0 arm [mask][lim u16],
@@ -126,7 +142,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     else if (d[1] == 1U) { n2 = hsdi_cm4_rec_status(r12); }
     else if ((d[1] == 2U) && (len == 5U)) { n2 = hsdi_cm4_rec_read((uint16_t)(d[2] | ((uint16_t)d[3] << 8)), d[4], r12); }
     else { r12[0] = 1U; n2 = 1U; }
-    OPENAMP_send(ept, r12, (size_t)n2);
+    rpc_reply(ept, r12, (size_t)n2);
     return 0;
   }
   if ((len == 4U) && (d[0] == 0x13U))            /* bench: software EXTI trigger [line, period_ms lo, hi]; period 0 = off (2026-09-03;
@@ -135,7 +151,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     extern void hsdi_cm4_swtest(uint8_t line, uint16_t period_ms);
     uint8_t st = 0;
     hsdi_cm4_swtest(d[1], (uint16_t)(d[2] | ((uint16_t)d[3] << 8)));
-    OPENAMP_send(ept, &st, 1);
+    rpc_reply(ept, &st, 1);
     return 0;
   }
   if ((len == 2U) && (d[0] == 0x0CU))            /* process-image scanner control doorbell (contract v1.4) */
@@ -149,7 +165,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
       case 2: PIMG->ctrl.running = 0U; break;    /* stop scanner */
       default: st = 1U; break;
     }
-    OPENAMP_send(ept, &st, 1);
+    rpc_reply(ept, &st, 1);
     return 0;
   }
   if ((len == 2U) && (d[0] == 0x06U))            /* LED phase sync (fire-and-forget, no reply) */
@@ -161,28 +177,28 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
   {
     uint8_t st[48];
     uint16_t n2 = mbport_cm4_uart_stats(st);
-    OPENAMP_send(ept, st, (size_t)n2);
+    rpc_reply(ept, st, (size_t)n2);
     return 0;
   }
   if ((len == 1U) && (d[0] == 0x04U))            /* scheduler status query */
   {
     uint8_t st[16];
     uint16_t n2 = mbport_cm4_status(st);
-    OPENAMP_send(ept, st, (size_t)n2);
+    rpc_reply(ept, st, (size_t)n2);
     return 0;
   }
   if ((len == 2U) && (d[0] == 0x07U))            /* master-port baud-rate switch (contract v1.2; code table = backplane 0x0011) */
   {
     extern int mbport_cm4_set_baud(uint8_t code);
     uint8_t st = (mbport_cm4_set_baud(d[1]) == 0) ? 0U : 1U;
-    OPENAMP_send(ept, &st, 1);
+    rpc_reply(ept, &st, 1);
     return 0;
   }
   if ((len >= 2U) && (d[0] == 0x02U))            /* raw send (test: bad-CRC frame injection) */
   {
     uint8_t ok = 0;
     mbport_cm4_raw_send(&d[1], (uint16_t)(len - 1U));
-    OPENAMP_send(ept, &ok, 1);
+    rpc_reply(ept, &ok, 1);
     return 0;
   }
   if ((len >= 4U) && (d[0] == 0x01U))            /* Modbus transaction */
@@ -190,7 +206,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     static uint8_t rsp[300];
     uint16_t rl = mbport_cm4_transact(d[1], &d[3], (uint16_t)(len - 3U), &rsp[1], (uint16_t)(sizeof(rsp) - 1U), d[2]);
     rsp[0] = (rl > 0U) ? 0U : ((d[2] == 0U) ? 0U : 1U);   /* broadcast with no reply = normal */
-    OPENAMP_send(ept, rsp, (size_t)(1U + rl));
+    rpc_reply(ept, rsp, (size_t)(1U + rl));
     return 0;
   }
   {
@@ -198,7 +214,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     size_t n = (len > (sizeof(rsp) - 5U)) ? (sizeof(rsp) - 5U) : len;
     memcpy(rsp, "pong:", 5);
     memcpy(&rsp[5], data, n);
-    OPENAMP_send(ept, rsp, n + 5U);
+    rpc_reply(ept, rsp, n + 5U);
   }
   return 0;
 }

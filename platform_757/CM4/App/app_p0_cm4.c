@@ -32,7 +32,11 @@ void app_p0_cm4_task(void)
      * uart heal all live there, so one unreachable device can no longer stall the others. What
      * stays here is only work that never blocks. */
     { extern void hsdi_cm4_poll(void); hsdi_cm4_poll(); }                /* onboard HSDI: extend counters, publish the image */
-    (void)HAL_IWDG_Refresh(&s_iwdg2);
+    { extern uint8_t bus_cm4_alive(void);
+      static uint32_t t_alive = 0;
+      static uint8_t  s_ok = 1U;
+      if ((HAL_GetTick() - t_alive) >= 1000U) { t_alive = HAL_GetTick(); s_ok = bus_cm4_alive(); }
+      if (s_ok) { (void)HAL_IWDG_Refresh(&s_iwdg2); } }   /* a bus/rpc thread that stopped spinning = stop feeding -> IWDG2 reset */
     if ((HAL_GetTick() - t) >= 500U) { t += 500U; P0_HB->cm4++; }
     osDelay(1);                                  /* 1ms tick: slave-reply real-time responsiveness (resource table §1) */
   }

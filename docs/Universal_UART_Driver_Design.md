@@ -56,7 +56,8 @@ GPIO pins do **not** go into cfg: pin AF attachment must be "done all at once af
 3. **Frame-end = IDLE hardware event**: no software timer; `Size % rxlen` wrap modulo.
 4. **TX contract**: `uart_write` copies into txbuf, starts DMA, and returns; `uart_flush(timeout)` waits for TC; writing again while busy = returns 0 (rejected). The TC callback = the sole moment to drop DE.
 5. **Error self-heal**: ErrorCallback only does `stats.hw_errs++` + raises the rx_dead flag; the application main loop calls `uart_heal()` to restart receiving in thread context. **Never restart a peripheral inside an interrupt callback.**
-6. **Diagnostics as standard**: `uart_stats_t{ rx_bytes, tx_bytes, frames, overrun, hw_errs }`—every port is observable by birth, one CLI command dumps it all.
+   The transmit side has its own watchdog (2026-11-17): `tx_busy` is cleared only by the transmit-complete callback, so a TX DMA error or an abort landing mid-frame used to leave the port unable to send for good (and a GPIO-driven DE asserted on the bus). Each frame now records its start time and a budget (its wire time at 12 bit times per byte + 20 ms); `uart_write` and `uart_heal` check it from the owner thread and, past the budget, abort the transmit, drop DE, free the port and count `stats.tx_stuck`.
+6. **Diagnostics as standard**: `uart_stats_t{ rx_bytes, tx_bytes, frames, overrun, hw_errs, tx_reject, rearm_fail, tx_stuck }`—every port is observable by birth, one CLI command dumps it all.
 7. **Concurrency contract (iron rule in the header comment)**: each instance = single reader + single writer; callbacks run in IRQ context and touch only this instance's fields; cross-task dispatch belongs to the upper layer.
 
 ### API at a glance

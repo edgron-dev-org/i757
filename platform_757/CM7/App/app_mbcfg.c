@@ -5,6 +5,7 @@
  * (3) shared CLI/cloud syntax mbcfg/mbpoll (4) defaultTask tick: first load / cloud command queue / TCP service.
  * Thread model: all on defaultTask except app_mbcfg_cloud (tcpip thread, only copies string + raises flag). */
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include "app_mbcfg.h"
@@ -191,13 +192,13 @@ void app_mbcfg_hb(char *out, int cap)
   for (int i = 0; i < NPORT; i++)
   {
     if (s_cfg[i].role == 0U) { continue; }
-    w += snprintf(out + w, (size_t)(cap - w), "%s%c:%c%u@%lu",
+    w = app_sncat(out, (uint16_t)w, cap, "%s%c:%c%u@%lu",
                   (w > 0) ? " " : "", s_names[i][3], s_role_ch[s_cfg[i].role],
                   (s_cfg[i].role == 1U) ? s_cfg[i].addr : 0U,
                   (unsigned long)s_cfg[i].baud);
     if (w >= cap - 12) { break; }
   }
-  snprintf(out + w, (size_t)(cap - w), "%stcp:%s", (w > 0) ? " " : "", s_tcp_on ? "on" : "off");
+  (void)app_sncat(out, (uint16_t)w, (size_t)cap, "%stcp:%s", (w > 0) ? " " : "", s_tcp_on ? "on" : "off");
 }
 
 /* ---- CLI: mbcfg ---- */
@@ -484,6 +485,21 @@ static int mb_master_do(uint8_t port, uint8_t addr, const uint8_t *pdu, int pn,
   return r;
 }
 
+uint16_t app_sncat(char *buf, uint16_t n, size_t cap, const char *fmt, ...)
+{
+  va_list ap;
+  int r;
+  if (cap == 0U) { return 0; }
+  if (cap > 0xFFFFU) { cap = 0xFFFFU; }
+  if ((size_t)n >= cap) { return (uint16_t)(cap - 1U); }   /* already full (or a caller's first snprintf overshot) */
+  va_start(ap, fmt);
+  r = vsnprintf(buf + n, cap - n, fmt, ap);
+  va_end(ap);
+  if (r < 0) { buf[n] = 0; return n; }
+  if ((size_t)r >= (cap - n)) { return (uint16_t)(cap - 1U); }   /* truncated: vsnprintf already terminated at cap-1 */
+  return (uint16_t)(n + (uint16_t)r);
+}
+
 int app_mb_read_holding(uint8_t port, uint8_t addr, uint16_t reg, uint16_t count, uint16_t *out)
 {
   uint8_t pdu[8], rsp[MB_PDU_MAX];
@@ -505,7 +521,7 @@ int app_mb_write_single(uint8_t port, uint8_t addr, uint16_t reg, uint16_t value
   uint8_t pdu[8], rsp[MB_PDU_MAX];
   int r = mb_master_do(port, addr, pdu, mb_req_write_single(pdu, MB_FC_WRITE_REG, reg, value), rsp, sizeof(rsp));
   if (r < 0) { return r; }
-  return mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_REG, reg, value) ? 0 : -3;
+  return (mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_REG, reg, value) == 0) ? 0 : -3;   /* write_ok returns 0 = echo matches */
 }
 
 int app_mb_write_multi(uint8_t port, uint8_t addr, uint16_t reg, uint16_t count, const uint16_t *vals)
@@ -513,7 +529,7 @@ int app_mb_write_multi(uint8_t port, uint8_t addr, uint16_t reg, uint16_t count,
   uint8_t pdu[MB_PDU_MAX], rsp[MB_PDU_MAX];
   int r = mb_master_do(port, addr, pdu, mb_req_write_regs(pdu, reg, count, vals), rsp, sizeof(rsp));
   if (r < 0) { return r; }
-  return mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_REGS, reg, count) ? 0 : -3;
+  return (mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_REGS, reg, count) == 0) ? 0 : -3;
 }
 
 /* ---- coil (digital output/input) helpers — relay modules live here. bits = packed little-endian ---- */
@@ -532,7 +548,7 @@ int app_mb_write_coil(uint8_t port, uint8_t addr, uint16_t coil, uint8_t on)    
   uint16_t v = on ? 0xFF00U : 0x0000U;
   int r = mb_master_do(port, addr, pdu, mb_req_write_single(pdu, MB_FC_WRITE_COIL, coil, v), rsp, sizeof(rsp));
   if (r < 0) { return r; }
-  return mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_COIL, coil, v) ? 0 : -3;
+  return (mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_COIL, coil, v) == 0) ? 0 : -3;
 }
 
 int app_mb_write_coils(uint8_t port, uint8_t addr, uint16_t coil, uint16_t count, const uint8_t *bits) /* FC15 */
@@ -540,5 +556,5 @@ int app_mb_write_coils(uint8_t port, uint8_t addr, uint16_t coil, uint16_t count
   uint8_t pdu[MB_PDU_MAX], rsp[MB_PDU_MAX];
   int r = mb_master_do(port, addr, pdu, mb_req_write_coils(pdu, coil, count, bits), rsp, sizeof(rsp));
   if (r < 0) { return r; }
-  return mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_COILS, coil, count) ? 0 : -3;
+  return (mb_rsp_write_ok(rsp, (uint16_t)r, MB_FC_WRITE_COILS, coil, count) == 0) ? 0 : -3;
 }

@@ -249,7 +249,7 @@ const char *app_user_hb_more(void)
   b[0] = 0;
   if (app_io_ok(PT_AIR) > 0)
   {
-    n += snprintf(b + n, sizeof(b) - (size_t)n, ",\"at\":%d,\"arh\":%u",
+    n = app_sncat(b, (uint16_t)n, sizeof(b), ",\"at\":%d,\"arh\":%u",
                   (int)(int16_t)app_io_ai(PT_AIR, 1), (unsigned)app_io_ai(PT_AIR, 0));
   }
   for (uint16_t k = 0; k < 4U; k++)
@@ -257,7 +257,7 @@ const char *app_user_hb_more(void)
     uint16_t pt = (uint16_t)(PT_COCO1 + k);
     if ((app_io_ok(pt) > 0) && (n >= 0) && ((size_t)n < sizeof(b)))
     {
-      n += snprintf(b + n, sizeof(b) - (size_t)n, ",\"cm%u\":%u,\"ct%u\":%d",
+      n = app_sncat(b, (uint16_t)n, sizeof(b), ",\"cm%u\":%u,\"ct%u\":%d",
                     (unsigned)(k + 1U), (unsigned)app_io_ai(pt, 1),
                     (unsigned)(k + 1U), (int)(int16_t)app_io_ai(pt, 0));
     }

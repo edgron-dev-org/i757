@@ -100,7 +100,7 @@ The old global `i757/*` topics were retired on 2026-07-24 (clean cut; the tools'
 | Command | Effect | Time to take effect |
 |---|---|---|
 | `broker-pub` | Force-switch to the public broker (our VPS) and reconnect | ~10s |
-| `broker-lan` | Force-switch to the LAN broker and reconnect | ~10s |
+| `broker-lan` | Force-switch to the LAN broker and reconnect. **USB console only (2026-11-17): refused when it arrives from the cloud** (journaled as a SYSTEM event) — the LAN broker is the plaintext bench broker and a remote command must not move a deployed board off TLS | ~10s |
 | `broker-aws` | Force-switch to AWS IoT Core (Sydney) and reconnect | ~10-20s |
 | `ota-apply` | Swap bank + reset (upgrade takes effect) | ~15s until heartbeat returns |
 | `ota-revert` | Same as above — the swap is an involution, swap once more = rollback | ~15s until heartbeat returns |
@@ -225,6 +225,7 @@ When a site has neither internet nor LAN, the USB-C service port doubles as the 
 - **Protocol**: console text commands pass through verbatim (the whole `ota-*`/`mota-*`/`broker-*` set works); `fwchunk <n>` followed by n raw bytes is the equivalent of one dn/fw message; the board answers `go`/`ok`.
 - **Confirmation without cloud**: after a self-upgrade bank swap the firmware is in its trial period and rolls back in 10 minutes if the cloud is unreachable — once the technician verifies the site, issue **`ota-confirm yes`** (CM4 ping-pong health is still required): the on-site manual promotion. Module upgrades have no trial concept and need nothing.
 - **Discipline**: never run a cloud OTA concurrently (the engines are single-session); on an interrupted transfer simply rerun the script (chunks are offset-idempotent, mota-begin resets); self-upgrades still require a signing private key on the operator machine (keys/fwsign, or the customer key registered on the board, §6.2bis — the anti-counterfeit chain is not relaxed just because the bytes travel over USB).
+- **Where `mota-flash` runs (2026-11-17)**: a `mota-flash <addr>` arriving from the cloud is handed to the main loop (the same context the USB console uses) instead of running inside the network thread, and the watchdog is fed once per accepted block. A module update over a noisy backplane (most blocks retried) can take well over the 32 s watchdog period; it used to hold the watchdog-feeding task off the CPU for that whole time.
 
 ## 7. Quick Troubleshooting
 

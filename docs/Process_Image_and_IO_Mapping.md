@@ -89,7 +89,7 @@ One entry = one unidirectional Modbus transaction, repeated at its own period.
 | `addr` | u8 | Modbus slave address (backplane modules use their DIP address 1..16) |
 | `access` | u8 | direction + function code + granularity, see below |
 | `start` | u16 | first coil / register address **inside that device** |
-| `count` | u16 | quantity (bits for coil/discrete, words for registers) |
+| `count` | u16 | quantity (bits for coil/discrete, words for registers). Limits per entry = the Modbus limits of the access type: read bits ≤ 2000, write coils ≤ 1968, read registers ≤ 125, write registers ≤ 123. An entry over its limit is rejected as invalid when the table is applied |
 | `img_off` | u16 | byte offset into the input or output image (assigned by `app_io_setup`) |
 | `period` | u16 | desired poll interval in base ticks; 0 = disabled |
 | `seq_idx` | u8 | which seqlock counter guards this entry's slice |

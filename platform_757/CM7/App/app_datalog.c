@@ -19,6 +19,7 @@
  * only slows the transfer down instead of punching holes in it. The same machinery pushes
  * yesterday's files automatically once per UTC day (mirror on the dash server). */
 #include <stdio.h>
+#include "app_platform.h"   /* app_sncat */
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -84,6 +85,21 @@ static char     s_date[12] = "";      /* UTC date of the open sample file */
 static char     s_suffix[3] = "";     /* "", "-b".. : same-day layout rotation */
 static uint32_t s_today_bytes = 0;
 static uint16_t s_werr = 0;           /* consecutive write errors (3 on SD -> flash fallback) */
+/* SD stall strike (2026-11-17). A card that hangs instead of failing blocks the calling task (the
+ * watchdog feeder) inside the disk driver; the reset wipes the RAM error count above, the next
+ * boot walks into the same card and the board loops through watchdog resets (which also count
+ * against an OTA trial). The marker lives in battery RAM and is set only while this module is
+ * executing with the SD card in play: watchdog reset + marker set = the card stalled, so this
+ * boot records to flash and leaves the card alone until the next reboot or `logcfg dev=sd`. */
+#include "app_pwrfail.h"
+#define DL_SD_MARK  0x5D57A11EUL
+PF_RETAIN static uint32_t s_sd_inflight;
+static uint8_t s_sd_struck = 0;       /* this boot: card benched by the strike (no periodic re-probe) */
+static void dl_sd_mark(uint8_t on)
+{
+  if (on) { if (s_devcfg == DEV_SD) { s_sd_inflight = DL_SD_MARK; } }
+  else    { s_sd_inflight = 0; }
+}
 static uint16_t s_drops = 0;          /* event-queue overflow count */
 static char     s_hbstr[48] = "init";
 
@@ -547,7 +563,7 @@ static void dl_build_header(char *out, uint16_t cap)
     {
       for (k = 0; k < 8U; k++)
       {
-        n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",m%u%s_avg,m%u%s_min,m%u%s_max",
+        n = app_sncat(out, (uint16_t)n, cap, ",m%u%s_avg,m%u%s_min,m%u%s_max",
                                 (unsigned)s_slot[i].addr, FLD[k], (unsigned)s_slot[i].addr, FLD[k],
                                 (unsigned)s_slot[i].addr, FLD[k]);
       }
@@ -556,7 +572,7 @@ static void dl_build_header(char *out, uint16_t cap)
     {
       for (k = 0; k < 16U; k++)
       {
-        n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",m%uc%u",
+        n = app_sncat(out, (uint16_t)n, cap, ",m%uc%u",
                                 (unsigned)s_slot[i].addr, (unsigned)(k + 1U));
       }
     }
@@ -661,14 +677,14 @@ static void dl_flush_row(uint32_t win_end_ts)
   n = (uint16_t)snprintf(s_line, sizeof s_line, "%lu", (unsigned long)win_end_ts);
   n += row_agg(&s_line[n], (uint16_t)(sizeof s_line - n), &s_temp);
   { extern uint8_t app_vent_stage(void);   /* true window stage (relay read-back, app_vent.c) */
-    n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%u", (unsigned)app_vent_stage()); }
+    n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ",%u", (unsigned)app_vent_stage()); }
   { extern uint8_t app_aer_state(void);    /* air pump, relay read-back (app_aer.c), 2026-09-08 */
-    n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%u", (unsigned)app_aer_state()); }
+    n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ",%u", (unsigned)app_aer_state()); }
   { extern uint32_t app_flow_dl(void);     /* water meter total, 0.1 L (app_user.c, HSDI0) */
-    n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%lu", (unsigned long)app_flow_dl()); }
+    n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ",%lu", (unsigned long)app_flow_dl()); }
   { extern uint16_t app_gutter_rate_dlmin(uint8_t);   /* per-gutter feed flow, 0.1 L/min (app_user.c) */
     for (uint8_t g = 0; g < 4U; g++)
-    { n += (uint16_t)snprintf(&s_line[n], (size_t)(sizeof s_line - n), ",%u", (unsigned)app_gutter_rate_dlmin(g)); } }
+    { n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ",%u", (unsigned)app_gutter_rate_dlmin(g)); } }
   for (i = 0; i < s_nslot; i++)
   {
     if (s_slot[i].type == DL_TYPE_PHEC)
@@ -684,10 +700,10 @@ static void dl_flush_row(uint32_t win_end_ts)
       {
         if (s_slot[i].have_cnt)
         {
-          n += (uint16_t)snprintf(&s_line[n], sizeof s_line - n, ",%lu",
+          n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ",%lu",
                                   (unsigned long)s_slot[i].cnt[k]);
         }
-        else { n += (uint16_t)snprintf(&s_line[n], sizeof s_line - n, ","); }
+        else { n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ","); }
       }
     }
   }
@@ -913,7 +929,11 @@ static void dl_dev_probe(void)
 {
   s_dev = DEV_OFF;
   if (s_devcfg == DEV_OFF) { snprintf(s_hbstr, sizeof s_hbstr, "off"); return; }
-  if (s_devcfg == DEV_SD)
+  if ((s_devcfg == DEV_SD) && s_sd_struck)
+  {
+    s_dev = DEV_FLASH;
+  }
+  else if (s_devcfg == DEV_SD)
   {
     FRESULT fr = f_mkdir("0:/log");
     if ((fr == FR_OK) || (fr == FR_EXIST)) { s_dev = DEV_SD; }
@@ -949,7 +969,7 @@ static int dl_name_ok(const char *s)
   return (s[0] != 0);
 }
 
-int app_datalog_cmd(const char *line, const char *src, char *out, uint16_t cap)
+static int dl_cmd_body(const char *line, const char *src, char *out, uint16_t cap)
 {
   if (strncmp(line, "note ", 5) == 0)
   {
@@ -1058,7 +1078,7 @@ int app_datalog_cli(char *line)   /* CLI hook (app_cli.c): note/logcfg/logstat/l
 const char *app_datalog_hb(void) { return s_hbstr; }
 
 /* ================= poll ================= */
-void app_datalog_poll(void)
+static void dl_poll_body(void)
 {
   static uint8_t  s_inited = 0;
   static uint8_t  s_subtick = 0;
@@ -1069,6 +1089,7 @@ void app_datalog_poll(void)
   {
     s_inited = 1U;
     dl_cfg_load();
+    dl_sd_mark((uint8_t)(!s_sd_struck));
     dl_dev_probe();
     (void)dl_lfs_load("log.pushed", &s_pushed_day, sizeof s_pushed_day);
     dl_win_reset();
@@ -1096,7 +1117,7 @@ void app_datalog_poll(void)
   /* configured for SD but running on flash (boot race / card pulled): re-probe every 10 min —
    * a working card takes over seamlessly; history written to flash meanwhile stays there */
   { static uint16_t s_sd_retry = 0;
-    if ((s_devcfg == DEV_SD) && (s_dev == DEV_FLASH))
+    if ((s_devcfg == DEV_SD) && (s_dev == DEV_FLASH) && !s_sd_struck)
     {
       if (++s_sd_retry >= 1200U)
       {
@@ -1135,4 +1156,33 @@ void app_datalog_poll(void)
     dl_push_poll();
   }
   dl_xfer_step();
+}
+
+void app_datalog_poll(void)
+{
+  static uint8_t s_checked = 0;
+  if (!s_checked)                       /* first call of this boot: read last boot's verdict before the marker is re-armed */
+  {
+    s_checked = 1U;
+    if (app_pf_retain_valid() && (s_sd_inflight == DL_SD_MARK)
+        && (strncmp(app_diag_reset_cause(), "IWDG1", 5) == 0))
+    {
+      s_sd_struck = 1U;
+      app_log_event_src("SYSTEM", "sys", "log sd stalled into watchdog -> flash until reboot");
+    }
+    s_sd_inflight = 0;
+  }
+  dl_sd_mark((uint8_t)(!s_sd_struck));
+  dl_poll_body();
+  dl_sd_mark(0U);
+}
+
+int app_datalog_cmd(const char *line, const char *src, char *out, uint16_t cap)
+{
+  int r;
+  if ((strncmp(line, "logcfg", 6) == 0) && (strstr(line, "dev=sd") != NULL)) { s_sd_struck = 0U; }   /* operator asks for the card again */
+  dl_sd_mark((uint8_t)(!s_sd_struck));
+  r = dl_cmd_body(line, src, out, cap);
+  dl_sd_mark(0U);
+  return r;
 }

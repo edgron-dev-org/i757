@@ -73,6 +73,7 @@
 #include "app_flowmon.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -120,6 +121,20 @@ extern lfs_t *app_lfs(void);
 #define MIN_SHOT_PH_ML     2U       /* smallest auto shot -> ripple floor */
 #define MIN_SHOT_AB_ML     15U
 #define NORESP_STRIKES     3U       /* consecutive no-response shots -> FAULT, auto off */
+/* ---- 2026-11-17 review batch (each ruling is exercised by the host bench in test/host_ferti) ---- */
+#define STRIKE_SUM_MULT    2        /* ... and together they should have moved the tank 2 x STRIKE_MIN_* */
+#define PH_RIDE_MAX        2U       /* pH shots in a row that may ride with an A/B pair (unjudged) before a pH check cycle */
+#define PH_ALONE_MAX       6U       /* consecutive cycles the A/B pair may be deferred so that a pH shot can be judged alone */
+#define PH_PLAUS_MIN       300U     /* pH x100: a nutrient tank outside 3.00..9.50 is a probe/ADC fault or a spill - not a number to dose on */
+#define PH_PLAUS_MAX       950U
+#define EC_PLAUS_MAX       6000U    /* uS: twice the highest settable target (3000) */
+#define PH_JUMP            30U      /* pH x100 per 5 s sample; a full base shot moves a whole tank ~0.2 over minutes */
+#define EC_JUMP_US         150U     /* uS per 5 s sample, or EC_JUMP_PCT of the trusted value if larger */
+#define EC_JUMP_PCT        15U
+#define JUMP_HOLD_N        120U     /* samples (5 s each = 600 s) a jumped value must hold before it is believed */
+#define WQ_BAD_N           12U      /* samples (60 s) the raw readings must stay unsafe before irrigation is held */
+#define USE_MAGIC          0x31455355UL   /* "USE1": 24 h usage record */
+#define USE_LOAD_WAIT_S    60U      /* wait this long for a clock before the record is taken unaged */
 #define PROBE_AFTER        5U       /* pH shots too small to learn from before one is enlarged to a learnable size */
 #define DEF_TANK_DL        1650U    /* reservoir volume, 0.1 L (greenhouse 165 L) -> `tank` */
 #define TOPUP_QUIET_S      60U      /* meter silent this long = fill episode over */
@@ -173,12 +188,35 @@ extern lfs_t *app_lfs(void);
 #define TAL_LOW      7U             /* float-valve systems: level low with no inflow = valve failed / supply off */
 #define LOW_DWELL_MS 120000UL       /* ... the low float must stay asserted this long before it counts (sloshing while the
                                      * irrigation pump draws, a float bobbing on the stop line; 2 min, user 2026-10-27) */
-#define TAL_N        8U
+#define TAL_CLOCK    8U             /* scheduled irrigation idle: no clock (SNTP/RTC) */
+#define TAL_N        9U
+#define NOCLK_ALARM_MS 600000UL     /* ... for this long in auto before the alarm */
+#define IRR_PH_LOW   100U           /* irrigation is held while the reservoir reads more than 1.00 pH BELOW target (acid overdose), */
+#define IRR_PH_HIGH  200U           /* ... more than 2.00 pH above it, */
+#define IRR_EC_PCT   150U           /* ... or EC above 150 % of target + deadband. Invalid readings never hold: a dead probe must not stop watering */
+#define DEF_FILL_MAX_S 900U         /* refill time limit when none is configured (0 used to mean "no limit") */
 #define CLOG_DROP_PCT 20U           /* irrigation rate down this much batch over batch = clogging */
 #define FULL_STUCK_N  2U            /* full float still asserted after this many irrigations = dry run / blocked line */
 #define FILL_OVERRUN_PCT 130U       /* inlet meter past this share of the batch with no full float = float stuck: stop, alarm */
 #define LEAK_WIN_MS   3600000UL     /* inlet meter movement with the valve commanded off, per hour ... */
 #define LEAK_DL       5U            /* ... beyond 0.5 L = valve not closing / leak */
+
+/* ---- module lock (2026-11-17) ----
+ * The service task and the command context (console / MQTT, another task) used to share every
+ * instance without a lock: run state, parameters, and the one littlefs file buffer that cfg_save
+ * (commands) and learn_save (task) both write through. One mutex now covers an instance's whole
+ * tick and a whole command. Status readers (heartbeat strings) stay lock-free: they only read. */
+static SemaphoreHandle_t s_mtx = NULL;
+static StaticSemaphore_t s_mtx_buf;
+static void sys_lock(void)
+{ if ((s_mtx != NULL) && (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)) { (void)xSemaphoreTake(s_mtx, portMAX_DELAY); } }
+static void sys_unlock(void)
+{ if ((s_mtx != NULL) && (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)) { (void)xSemaphoreGive(s_mtx); } }
+
+/* Real time since the previous pass of the service task. Every timer below (shot length,
+ * irrigation, stir, dwell) counts this instead of a nominal 500 ms per pass: counting passes made
+ * a pump run longer by exactly as long as this low-priority task was kept off the CPU. */
+static uint32_t s_dt_ms = TICK_MS;
 
 /* ---- instance table ---- */
 static ferti_sys_t *s_sys[FERTI_MAX];
@@ -187,7 +225,7 @@ static uint8_t      s_started = 0;
 static const char  *s_pump_name4[PUMPS] = { "a", "b", "acid", "base" };
 static const uint32_t s_lref[3] = { LEARN_REF_ML_AB, LEARN_REF_ML_PH, LEARN_REF_ML_PH };
 static const char  *s_tname[8] = { "-", "idle", "fill", "dose", "stir", "verify", "ready", "FAULT" };
-static const char  *s_tal_name[TAL_N] = { "overflow", "fill", "verify", "runoff", "clog", "leak", "fresh", "low" };
+static const char  *s_tal_name[TAL_N] = { "overflow", "fill", "verify", "runoff", "clog", "leak", "fresh", "low", "clock" };
 
 ferti_sys_t *ferti_first(void) { return s_n ? s_sys[0] : NULL; }
 uint8_t ferti_count(void) { return s_n; }
@@ -253,7 +291,17 @@ static uint32_t meter_read(ferti_sys_t *s)      /* 0.1 L since boot: pulse meter
 {
   const ferti_bind_t *b = s->b;
   if (b->meter.pt == FERTI_PT_HSDI)
-  { return (uint32_t)((uint64_t)app_hsdi_count(b->meter.ch) * 10ULL / (b->meter_ppl ? b->meter_ppl : 1U)); }
+  {
+    /* The HSDI accumulator restarts from 0 whenever CM4 reloads the channel configuration (any
+     * `hsdi ...` or `pulse ...` command). Every consumer takes differences of this reading in
+     * unsigned arithmetic, so a restart looked like ~4e9 units of inflow: a phantom top-up with A
+     * and B at the episode cap. A reading that goes down is absorbed into the base instead - the
+     * returned value never decreases and a restart adds no volume. */
+    uint32_t raw = (uint32_t)((uint64_t)app_hsdi_count(b->meter.ch) * 10ULL / (b->meter_ppl ? b->meter_ppl : 1U));
+    if (raw < s->m_raw) { s->m_base += s->m_raw - raw; }
+    s->m_raw = raw;
+    return s->m_base + raw;
+  }
   return s->vmeter_dl;
 }
 
@@ -389,7 +437,7 @@ static void cfg_load(ferti_sys_t *s)
   if (nf >= 35)                              /* hydraulics tail (2026-10-26) */
   {
     if (bdl <= 10000U) { p->batch_dl = (uint16_t)bdl; }
-    if (fmx <= 7200U)  { p->fill_max_s = (uint16_t)fmx; }
+    if ((fmx >= 10U) && (fmx <= 7200U)) { p->fill_max_s = (uint16_t)fmx; }   /* same bounds as `dose fill`; 0 keeps the seed */
     if (sts <= 3600U)  { p->stir_s = (uint16_t)sts; }
     if (vr <= 20U)     { p->verify_rounds = (uint8_t)vr; }
     if (ipd <= 24U)    { p->irr_per_day = (uint8_t)ipd; }
@@ -505,7 +553,7 @@ static void learn_reset(ferti_sys_t *s)
   s->L.drift_ph = SEED_DRIFT_PH; s->L.drift_ec = SEED_DRIFT_EC;
   for (uint8_t k = 0; k < 3U; k++) { learn_seed_sums(s, k); }
   s->L.tu_typ_dl = 0U; s->L.fill_mls = 0U; s->L.irr_mls = 0U;
-  memset(s->strikes, 0, sizeof(s->strikes));
+  memset(s->strikes, 0, sizeof(s->strikes)); memset(s->nr_exp, 0, sizeof(s->nr_exp)); s->ph_alone = 0U;
   memset(s->unlearned, 0, sizeof(s->unlearned));
   s->ff_ph = 0; s->ff_ec = 0; s->last.kind = K_IDLE;
   s->acc_dph = 0; s->acc_dec = 0; s->acc_dose_ph = 0; s->acc_dose_ec = 0; s->acc_t = 0;
@@ -552,6 +600,7 @@ static void shot_start_next(ferti_sys_t *s)
   }
   memmove(&s->q[0], &s->q[1], sizeof(s->q) - sizeof(s->q[0]));
   s->qn--;
+  s->use_dirty = 1U;                      /* saved by chem_tick outside the critical section */
   taskEXIT_CRITICAL();
 }
 
@@ -577,7 +626,82 @@ static uint32_t ml_24h_slot(const ferti_sys_t *s, uint8_t slot)     /* A/B: the 
   return used;
 }
 
-static void caps_clear(ferti_sys_t *s) { memset(s->ml_h, 0, sizeof(s->ml_h)); s->hi = 0; s->hour_s = 0; }
+static void caps_clear(ferti_sys_t *s) { memset(s->ml_h, 0, sizeof(s->ml_h)); s->hi = 0; s->hour_s = 0; s->use_dirty = 1U; s->use_loaded = 1U; }   /* use_loaded: an operator clear also cancels a pending merge of the stored record */
+
+/* ---- 24 h usage record on littlefs (2026-11-17) ----
+ * The window lived in RAM only: any reset handed out a fresh 24 h allowance, so "tube fell out of the
+ * tank -> cap hold" followed by one power cut dosed a second full cap. The ring is now saved when a
+ * shot starts and when an hour rolls over, and merged back after boot:
+ *  - record and board both have a clock: the buckets are aged by the wall-clock time that passed
+ *    (a board that was off for 5 h gets those 5 h back; off for a day = empty window);
+ *  - no clock on either side: the record counts as current and ages with uptime (the safe side).
+ * Loading waits up to USE_LOAD_WAIT_S for SNTP/RTC; shots dosed meanwhile are in the ring already and
+ * the record is ADDED to it. Nothing is written before that merge, so a reboot loop cannot erase it. */
+typedef struct { uint32_t magic, ts; uint16_t hour_s, sum; uint16_t ml[CAP_HOURS][PUMPS]; } use_rec_t;
+
+static uint16_t use_sum(const use_rec_t *r)
+{
+  uint32_t a = r->ts ^ (r->ts >> 16) ^ r->hour_s;
+  for (uint8_t h = 0; h < CAP_HOURS; h++) { for (uint8_t k = 0; k < PUMPS; k++) { a = (a * 31U) + r->ml[h][k]; } }
+  return (uint16_t)(a ^ (a >> 16));
+}
+
+static void use_save(ferti_sys_t *s)
+{
+  lfs_t *fs = app_lfs();
+  lfs_file_t f;
+  struct lfs_file_config fc = { .buffer = s->dfbuf };
+  use_rec_t r;
+  if ((fs == NULL) || !s->use_loaded) { return; }
+  r.magic = USE_MAGIC; r.ts = app_time_now(); r.hour_s = (uint16_t)s->hour_s;
+  for (uint8_t h = 0; h < CAP_HOURS; h++)                    /* oldest first: [CAP_HOURS-1] = the current hour */
+  { memcpy(r.ml[h], s->ml_h[(s->hi + 1U + h) % CAP_HOURS], sizeof(r.ml[h])); }
+  r.sum = use_sum(&r);
+  if (lfs_file_opencfg(fs, &f, s->use_file, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC, &fc) != 0) { return; }
+  (void)lfs_file_write(fs, &f, &r, sizeof r);
+  (void)lfs_file_close(fs, &f);
+}
+
+static void use_load(ferti_sys_t *s)
+{
+  lfs_t *fs = app_lfs();
+  lfs_file_t f;
+  struct lfs_file_config fc = { .buffer = s->dfbuf };
+  use_rec_t r;
+  uint32_t now = app_time_now(), age_h = 0, hs;
+  lfs_ssize_t n;
+  if (fs == NULL) { return; }
+  if (lfs_file_opencfg(fs, &f, s->use_file, LFS_O_RDONLY, &fc) != 0) { return; }
+  n = lfs_file_read(fs, &f, &r, sizeof r);
+  (void)lfs_file_close(fs, &f);
+  if ((n != (lfs_ssize_t)sizeof r) || (r.magic != USE_MAGIC) || (r.sum != use_sum(&r)) || (r.hour_s >= 3600U)) { return; }
+  hs = r.hour_s;
+  if ((r.ts != 0U) && (now != 0U) && (now > r.ts))
+  { uint32_t el = (now - r.ts) + r.hour_s; age_h = el / 3600U; hs = el % 3600U; }
+  for (uint8_t h = 0; h < CAP_HOURS; h++)
+  {
+    uint16_t *dst;
+    if ((uint32_t)h < age_h) { continue; }                     /* this bucket is older than 24 h by now */
+    dst = s->ml_h[(s->hi + 1U + (h - age_h)) % CAP_HOURS];
+    for (uint8_t k = 0; k < PUMPS; k++)
+    {
+      uint32_t v = (uint32_t)dst[k] + r.ml[h][k];
+      dst[k] = (v > 65535UL) ? 65535U : (uint16_t)v;
+    }
+  }
+  if (hs > s->hour_s) { s->hour_s = hs; }
+  ev(s, "SYSTEM", "%s 24h record restored (%s%luh): A%lu/B%lu/ac%lu/bs%luml", s->tag,
+     ((r.ts != 0U) && (now != 0U)) ? "aged " : "no clock, taken as current, ", (unsigned long)age_h,
+     (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), (unsigned long)ml_24h(s, P_ACID), (unsigned long)ml_24h(s, P_BASE));
+}
+
+static void use_poll(ferti_sys_t *s)        /* every 5 s */
+{
+  if (s->use_loaded || (app_lfs() == NULL)) { return; }
+  if ((app_time_now() == 0U) && (s->use_wait_s < USE_LOAD_WAIT_S)) { s->use_wait_s += 5U; return; }
+  use_load(s);
+  s->use_loaded = 1U; s->use_dirty = 1U;
+}
 
 static void dose_alarm(ferti_sys_t *s, uint8_t slot, uint8_t active) { s->al_pend[slot] = active ? 1U : 2U; }
 
@@ -593,9 +717,25 @@ static const char *cap_name(const ferti_sys_t *s, uint8_t slot) { return (slot =
  * A and B always dose the same volume, so the pair is one hold (slot P_A, bits A|B). */
 #define CAP_RELEASE_DIV    8U       /* release once cap/8 is free again (never less than a minimum shot) */
 
-static uint32_t cap_room(const ferti_sys_t *s, uint8_t slot)
+/* ml already queued but not yet started for this cap slot. Usage is booked when a shot STARTS, so
+ * without this a path that queues while shots are still waiting (top-up settlement every 5 s, a
+ * burst of manual shots) was granted the same room again and again. */
+static uint32_t queued_ml(ferti_sys_t *s, uint8_t slot)
 {
-  uint32_t used = ml_24h_slot(s, slot);
+  uint32_t a = 0, b = 0;
+  taskENTER_CRITICAL();
+  for (uint8_t i = 0; i < s->qn; i++)
+  {
+    if (slot == P_A) { if (s->q[i].pump == P_A) { a += s->q[i].ml; } else if (s->q[i].pump == P_B) { b += s->q[i].ml; } }
+    else if (s->q[i].pump == slot) { a += s->q[i].ml; }
+  }
+  taskEXIT_CRITICAL();
+  return (a > b) ? a : b;
+}
+
+static uint32_t cap_room(ferti_sys_t *s, uint8_t slot)
+{
+  uint32_t used = ml_24h_slot(s, slot) + queued_ml(s, slot);
   return (used < s->p.cap_ml[slot]) ? ((uint32_t)s->p.cap_ml[slot] - used) : 0U;
 }
 
@@ -696,7 +836,7 @@ static void flush_events(ferti_sys_t *s)
                  "{\"pv\":1,\"ts\":%lu,\"id\":\"al.tank.%s.%s\",\"src\":\"%s\",\"sev\":\"%s\",\"state\":\"%s\","
                  "\"msg\":\"Tank %s: %s %s\",\"val\":%u}",
                  (unsigned long)app_time_now(), s->b->name, s_tal_name[k], s->evsrc,
-                 ((k == TAL_OVERFLOW) || (k == TAL_FILL) || (k == TAL_FRESH) || (k == TAL_LOW)) ? "alarm" : "warn",
+                 ((k == TAL_OVERFLOW) || (k == TAL_FILL) || (k == TAL_FRESH) || (k == TAL_LOW) || (k == TAL_CLOCK) || ((k == TAL_VERIFY) && s->irr_wq_held)) ? "alarm" : "warn",
                  active ? "active" : "clear", s->b->name, s_tal_name[k], active ? s->fault_why : "cleared", (unsigned)s->tstate);
     if ((n > 0) && (app_mqtt_pub_updata("event", js, (uint16_t)n) == 0)) { s->tal_pend[k] = 0U; }
     else { return; }
@@ -828,12 +968,20 @@ static void learn_step(ferti_sys_t *s, uint16_t ec, uint16_t ph)
       obs = resp / (int32_t)s->last.ml;                      /* x1000 per ml, same scale as gain */
       if (obs < (int32_t)(L->gain[slot] / 10U))              /* less than a tenth of the expected move */
       {
-        if ((expect >= smin) && (++s->strikes[slot] >= NORESP_STRIKES))
+        /* 2026-11-17 (review): a miss used to count only when this one shot was expected to move the tank
+         * by STRIKE_MIN_* (pH 0.08 / EC 10 uS). The default acid shot is 1100 x 5 ml = 0.055 pH, so an empty
+         * acid bottle or a dead pH probe could never trip and the loop dosed its 24 h cap every day. Now every
+         * learnable miss counts and the trip needs BOTH the strike count and a cumulative expected movement of
+         * STRIKE_SUM_MULT x STRIKE_MIN_*: single shots below the noise floor prove nothing, a run of them does.
+         * Shots at or above STRIKE_MIN_* trip exactly as before. */
+        if (s->strikes[slot] < 255U) { s->strikes[slot]++; }
+        s->nr_exp[slot] = (s->nr_exp[slot] > (0x3FFFFFFFL - expect)) ? 0x3FFFFFFFL : (s->nr_exp[slot] + expect);
+        if ((s->strikes[slot] >= NORESP_STRIKES) && (s->nr_exp[slot] >= (int32_t)STRIKE_SUM_MULT * smin))
         {
           ev(s, "FAULT", "%s %s: %u shots with no response (last %uml moved %ld) -> auto off",
              s->tag, nm, (unsigned)s->strikes[slot], (unsigned)s->last.ml,
              (long)((s->last.kind == K_EC) ? d_ec : d_ph));
-          s->strikes[slot] = 0;
+          s->strikes[slot] = 0; s->nr_exp[slot] = 0;
           { char r[40]; snprintf(r, sizeof r, "AUTO OFF: %s pump no response", nm); dose_off_fault(s, r); }
         }
       }
@@ -858,7 +1006,8 @@ static void learn_step(ferti_sys_t *s, uint16_t ec, uint16_t ph)
           g = (g < (int32_t)(seed / 5U)) ? (int32_t)(seed / 5U) : (int32_t)(seed * 5U);
           L->gain[slot] = (uint32_t)g; learn_seed_sums(s, slot);
         }
-        L->gain[slot] = (uint32_t)g; s->strikes[slot] = 0; s->unlearned[slot] = 0;
+        L->gain[slot] = (uint32_t)g; s->strikes[slot] = 0; s->nr_exp[slot] = 0; s->unlearned[slot] = 0;
+        if (slot != 0U) { s->ph_alone = 0U; }
         learn_save(s);
         ev(s, "SYSTEM", "%s learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld%s, %ld/ml over %ld.%02ldml)",
            s->tag, nm, (unsigned long)old, (unsigned long)L->gain[slot], (unsigned)s->last.ml,
@@ -915,14 +1064,81 @@ static void sens_track(ferti_sys_t *s, uint16_t ec, uint16_t ph)
   s->ph_avg = ring_mean(s, s->ph_ring);
 }
 
+/* Plausibility + jump gate (2026-11-17, review). One call per 5 s sample and channel;
+ * returns the value the loop may act on, or SENS_INVAL.
+ *  - outside [lo, hi]: never used (journal once).
+ *  - more than `jump` away from the last TRUSTED sample: not used, and the trusted value does not move. A
+ *    mixed tank cannot step that far in 5 s; a probe connector, a bubble on the glass or a bad conversion
+ *    can (coco tank 2026-10-29: pH read 8.0 for a while and one acid shot took the real tank to 2.5;
+ *    2026-11: 2 min at pH 3.29). The value is believed only after it has stayed put (each sample within
+ *    `jump` of the previous one) for JUMP_HOLD_N samples = 10 min: a real step (reservoir change, probe
+ *    moved) costs a 10 min pause and one discarded learning cycle.
+ *  - coming back near the trusted value clears the suspicion at once.
+ * The trusted value follows every accepted sample, so slow real changes (dosing, top-up, drift) pass. */
+static uint16_t gate_step(ferti_sys_t *s, struct ferti_gate *g, uint16_t x, uint16_t lo, uint16_t hi, uint16_t jump, const char *nm)
+{
+  uint16_t d, dc;
+  if (x == (uint16_t)SENS_INVAL) { g->n = 0; return (uint16_t)SENS_INVAL; }
+  if ((x < lo) || (x > hi))
+  {
+    if (!g->oor) { g->oor = 1U; ev(s, "FAULT", "%s %s reading %u outside the plausible range %u..%u -> not used. CHECK probe, cable, calibration", s->tag, nm, (unsigned)x, (unsigned)lo, (unsigned)hi); }
+    g->n = 0; g->ok_n = 0;
+    return (uint16_t)SENS_INVAL;
+  }
+  if (g->oor)                      /* back in range: believed after AVG_N samples (1 min) in a row */
+  {
+    if (++g->ok_n < AVG_N) { return (uint16_t)SENS_INVAL; }
+    g->oor = 0; g->tr = (uint16_t)SENS_INVAL;
+    ev(s, "SYSTEM", "%s %s reading %u back in the plausible range", s->tag, nm, (unsigned)x);
+  }
+  if (g->tr == (uint16_t)SENS_INVAL) { g->tr = x; return x; }
+  d = (x > g->tr) ? (uint16_t)(x - g->tr) : (uint16_t)(g->tr - x);
+  if (d <= jump)
+  {
+    if (g->n) { ev(s, "SYSTEM", "%s %s back at %u after %us: jump ignored", s->tag, nm, (unsigned)x, (unsigned)(g->n * 5U)); }
+    g->n = 0; g->tr = x;
+    return x;
+  }
+  dc = (x > g->cand) ? (uint16_t)(x - g->cand) : (uint16_t)(g->cand - x);
+  if (g->n == 0U) { ev(s, "FAULT", "%s %s jumped %u -> %u between two samples: held, not used until it has stayed for %us", s->tag, nm, (unsigned)g->tr, (unsigned)x, (unsigned)(JUMP_HOLD_N * 5U)); }
+  g->n = ((g->n == 0U) || (dc > jump)) ? 1U : (uint16_t)(g->n + 1U);
+  g->cand = x;
+  if (g->n >= JUMP_HOLD_N)
+  {
+    ev(s, "SYSTEM", "%s %s step %u -> %u accepted after %us (learning skips this cycle)", s->tag, nm, (unsigned)g->tr, (unsigned)x, (unsigned)(JUMP_HOLD_N * 5U));
+    g->n = 0; g->tr = x; s->confound = 1U;
+    return x;
+  }
+  return (uint16_t)SENS_INVAL;
+}
+
+/* one 5 s sample of both channels: source policy (probe pair) -> gate -> s->ec / s->ph -> 60 s mean */
+static void sens_sample(ferti_sys_t *s)
+{
+  const ferti_param_t *p = &s->p;
+  uint16_t ec = ec_read(s), ph = ph_read(s), ej;
+  int bad = 0;
+  /* Irrigation safety looks at what the probes say BEFORE the gate: a reservoir that really is at pH 2.5
+   * is "implausible" to the dosing loop, and must still stop the irrigation pump. */
+  s->ec_raw = ec; s->ph_raw = ph;
+  if ((ph != (uint16_t)SENS_INVAL) &&
+      (((uint32_t)ph + IRR_PH_LOW < p->ph_target) || ((uint32_t)ph > (uint32_t)p->ph_target + IRR_PH_HIGH))) { bad = 1; }
+  if ((ec != (uint16_t)SENS_INVAL) && ((uint32_t)ec > (uint32_t)p->ec_target * IRR_EC_PCT / 100U + p->ec_db)) { bad = 1; }
+  if (!bad) { s->wq_bad_n = 0U; } else if (s->wq_bad_n < 255U) { s->wq_bad_n++; }
+
+  ej = (s->g_ec.tr == (uint16_t)SENS_INVAL) ? EC_JUMP_US : (uint16_t)((uint32_t)s->g_ec.tr * EC_JUMP_PCT / 100U);
+  s->ec = gate_step(s, &s->g_ec, ec, 0U, EC_PLAUS_MAX, (ej < EC_JUMP_US) ? EC_JUMP_US : ej, "EC");
+  s->ph = gate_step(s, &s->g_ph, ph, PH_PLAUS_MIN, PH_PLAUS_MAX, PH_JUMP, "pH");
+  sens_track(s, s->ec, s->ph);
+}
+
 static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle, circulation ok */
 {
   const ferti_param_t *p = &s->p;
   ferti_lrn_t *L = &s->L;
-  uint16_t ec = ec_read(s), ph = ph_read(s);
-  s->ec = ec;
-  s->ph = ph;
-  sens_track(s, s->ec, s->ph);
+  uint16_t ec, ph;
+  sens_sample(s);
+  ec = s->ec; ph = s->ph;
   /* EC gates the eval (fertilizer is the primary loop); a dead/untrusted pH only
    * stops the pH branch — A/B dosing continues */
   int valid = (ec != SENS_INVAL) && (ec >= EC_DRY_FLOOR);
@@ -982,6 +1198,23 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       else if (need_ph < 0) { ml_ph = -need_ph / (int32_t)L->gain[1]; if (ml_ph > (int32_t)p->acid_ml) { ml_ph = (int32_t)p->acid_ml; } }
     }
 
+    /* pH check cycle (2026-11-17, review): a pH shot that goes out together with an A/B pair is never
+     * judged (the stock moves pH too), so while EC needed feeding every cycle a dead pH pump or probe was
+     * never noticed. Once PH_RIDE_MAX pH shots in a row went unjudged, the A/B pair waits one full mix
+     * period and the pH shot goes alone - learnable and strikable. Bounded: at most PH_ALONE_MAX cycles in
+     * a row, only if the lone shot can reach the learning threshold, and not while the pH cap holds. */
+    uint8_t ph_check = 0U;
+    if ((ml_ab >= (int32_t)MIN_SHOT_AB_ML) && (ml_ph >= (int32_t)MIN_SHOT_PH_ML))
+    {
+      uint8_t pump = (need_ph > 0) ? P_BASE : P_ACID, slot = (need_ph > 0) ? 2U : 1U;
+      int32_t capc  = (need_ph > 0) ? (int32_t)p->base_ml : (int32_t)p->acid_ml;
+      int32_t probe = ((int32_t)LEARN_MIN_PH * 1000L + (int32_t)L->gain[slot] - 1) / (int32_t)L->gain[slot];
+      int32_t m     = (ml_ph >= probe) ? ml_ph : ((probe <= capc) ? probe : ml_ph);
+      if ((s->unlearned[slot] >= PH_RIDE_MAX) && (s->ph_alone < PH_ALONE_MAX) && !(s->caphold & (uint8_t)(1U << pump)) &&
+          (m * (int32_t)L->gain[slot] >= (int32_t)LEARN_MIN_PH * 1000L))
+      { ml_ab = 0; ph_check = 1U; s->ph_alone++; }
+    }
+
     s->last.kind = K_IDLE; s->last.ec0 = ec; s->last.ph0 = ph; s->last.flow0 = meter_read(s); s->last.dil = 0; s->last.ph_ml = 0U;
 
     if (ml_ab >= (int32_t)MIN_SHOT_AB_ML)
@@ -994,13 +1227,14 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       (void)shot_queue(s, P_A, (uint16_t)ml_ab, "auto", "ec-need");
       (void)shot_queue(s, P_B, (uint16_t)ml_ab, "auto", "ec-need");
       s->last.kind = K_EC; s->last.slot = 0U; s->last.ml = (uint16_t)ml_ab; s->ff_ec = 0; s->tu_carry = 0;
+      s->ph_alone = 0U;
     }
     if (ml_ph >= (int32_t)MIN_SHOT_PH_ML)                                 /* 2026-09-20: pH no longer waits for an A/B-free cycle */
     {
       uint8_t  pump = (need_ph > 0) ? P_BASE : P_ACID;
       uint8_t  slot = (need_ph > 0) ? 2U : 1U;
       int32_t  capc = (need_ph > 0) ? (int32_t)p->base_ml : (int32_t)p->acid_ml;
-      const char *why = "ph-need";
+      const char *why = ph_check ? "ph-need check (A/B waits one cycle)" : "ph-need";
       if ((s->last.kind != K_EC) && (s->unlearned[slot] >= PROBE_AFTER))   /* probe: the smallest shot the learner accepts */
       {
         int32_t probe = ((int32_t)LEARN_MIN_PH * 1000L + (int32_t)L->gain[slot] - 1) / (int32_t)L->gain[slot];
@@ -1026,6 +1260,7 @@ static int32_t topup_shot(ferti_sys_t *s, int32_t ml, const char *why)
 {
   if ((ml < (int32_t)MIN_SHOT_AB_ML) || (s->qn > (uint8_t)(QLEN - 2U)) ||
       (s->ec == (uint16_t)SENS_INVAL) || (s->ec < EC_DRY_FLOOR)) { return 0; }
+  if ((uint32_t)s->ec > (uint32_t)s->p.ec_target + s->p.ec_db) { return 0; }   /* already above the band: volume says "owed", the probe says no. The debt stays on the books and the loop decides once EC is back in range */
   if (ml > (int32_t)(TOPUP_CAP_ML - s->tu_ep_ml)) { ml = (int32_t)(TOPUP_CAP_ML - s->tu_ep_ml); }
   if (ml < (int32_t)MIN_SHOT_AB_ML) { return 0; }
   { uint32_t fit = (uint32_t)ml; if (cap_blocked(s, P_A, &fit)) { return 0; } ml = (int32_t)fit; }   /* held: the debt stays owed, the loop's feed-forward inherits it once the window frees */
@@ -1118,7 +1353,7 @@ static void chem_tick(ferti_sys_t *s)
 {
   if (s->run >= 0)                        /* pump timing, 500 ms granularity */
   {
-    s->run_ms = (s->run_ms > TICK_MS) ? (s->run_ms - TICK_MS) : 0U;
+    s->run_ms = (s->run_ms > s_dt_ms) ? (s->run_ms - s_dt_ms) : 0U;
     if (s->run_ms == 0U) { s->run = -1; }
   }
   if (s->run < 0) { shot_start_next(s); }
@@ -1127,15 +1362,14 @@ static void chem_tick(ferti_sys_t *s)
   {
     s->evl = 0;
     s->hour_s += 5U;                      /* rolling 24 h caps: a new bucket every hour, the oldest drops out */
-    if (s->hour_s >= 3600U) { s->hour_s = 0; s->hi = (uint8_t)((s->hi + 1U) % CAP_HOURS); memset(s->ml_h[s->hi], 0, sizeof(s->ml_h[s->hi])); }
+    if (s->hour_s >= 3600U) { s->hour_s = 0; s->hi = (uint8_t)((s->hi + 1U) % CAP_HOURS); memset(s->ml_h[s->hi], 0, sizeof(s->ml_h[s->hi])); s->use_dirty = 1U; }
+    use_poll(s);
     if (s->mode == M_AUTO) { flowlock(s); caps_release_poll(s); }
     flush_events(s);
     if ((s->mode == M_AUTO) && !s->flowhold && (s->run < 0) && (s->qn == 0U)) { chem_eval(s); }
     else if (s->mode != M_RELEASE)        /* keep status readings fresh even when not evaluating */
     {
-      s->ec = ec_read(s);
-      s->ph = ph_read(s);
-      sens_track(s, s->ec, s->ph);
+      sens_sample(s);
     }
     if ((s->mode == M_AUTO) && !s->flowhold) { topup_poll(s); }   /* after the readings above are fresh */
     else { topup_reset(s); }              /* off/hold: water that came in then is not ours to replace */
@@ -1143,6 +1377,7 @@ static void chem_tick(ferti_sys_t *s)
   if (s->mode != M_RELEASE) { s->rel_done = 0U; pump_assert(s); }
   else if (!s->rel_done)                  /* entering release: drop our coils once (a shot may have been running), then hands off */
   { s->rel_done = 1U; pump_assert(s); }
+  if (s->use_dirty && s->use_loaded) { s->use_dirty = 0U; use_save(s); }   /* after the coils: a flash write must never delay a pump going off */
 }
 
 /* ================= hydraulics (bindings with a fill pin) ================= */
@@ -1196,7 +1431,7 @@ static void tank_outputs(ferti_sys_t *s)
      * cycle's stirring reached the probe; mix_s = stir_s = 180 s means the stirrer stops at the decision). */
     uint8_t active = (uint8_t)(s->irr_on || s->tu_in || (s->run >= 0));
     if (active) { s->stir_ms_left = (uint32_t)s->p.stir_s * 1000UL; }
-    else if (s->stir_ms_left > 0U) { s->stir_ms_left = (s->stir_ms_left > TICK_MS) ? (s->stir_ms_left - TICK_MS) : 0U; }
+    else if (s->stir_ms_left > 0U) { s->stir_ms_left = (s->stir_ms_left > s_dt_ms) ? (s->stir_ms_left - s_dt_ms) : 0U; }
     coil_set(b->stir, (uint8_t)(run && (active || (s->stir_ms_left > 0U))));
   }
   coil_set(b->irr,  (uint8_t)(s->irr_on && (s->mode != M_RELEASE)));
@@ -1230,6 +1465,30 @@ static void irr_stop(ferti_sys_t *s)
   s->irr_on = 0U; s->irr_ms_left = 0U; s->since_irr_ms = 0U; s->irr_n_batch++;
 }
 
+/* Last gate before an automatic irrigation. A float-valve reservoir has no refill -> verify step,
+ * so nothing ever looked at the water before it went onto the plants (2026-10-29: one acid shot on a
+ * false pH reading took the coco tank to pH 2.5). Only a VALID reading far outside the band holds;
+ * an invalid one never does - a dead probe must not stop watering. Returns 1 = hold (alarm raised
+ * once, cleared when the water is back in range); manual `irr now` is not gated. */
+static int irr_water_unsafe(ferti_sys_t *s)
+{
+  const ferti_param_t *p = &s->p;
+  uint16_t ec = s->ec_raw, ph = s->ph_raw;                    /* ungated, see sens_sample() */
+  int bad = (s->wq_bad_n >= WQ_BAD_N);                        /* unsafe for a full minute, not one odd sample */
+  if (bad && !s->irr_wq_held)
+  {
+    s->irr_wq_held = 1U; tank_alarm(s, TAL_VERIFY, 1U, "water unsafe");
+    ev(s, "FAULT", "%s irrigation held: reservoir ec=%u ph=%u far outside target %u/%u", s->tag,
+       (unsigned)ec, (unsigned)ph, (unsigned)p->ec_target, (unsigned)p->ph_target);
+  }
+  else if (!bad && s->irr_wq_held)
+  {
+    s->irr_wq_held = 0U; tank_alarm(s, TAL_VERIFY, 0U, NULL);
+    ev(s, "SYSTEM", "%s reservoir back in the safe range (ec=%u ph=%u) -> irrigation released", s->tag, (unsigned)ec, (unsigned)ph);
+  }
+  return bad;
+}
+
 /* timed / moisture-triggered irrigation, only when the batch is READY */
 static void irr_sched(ferti_sys_t *s)
 {
@@ -1241,12 +1500,22 @@ static void irr_sched(ferti_sys_t *s)
     for (uint8_t k = 0; k < 4U; k++) { uint16_t v = ai_read(&s->b->moisture[k]); if (v != (uint16_t)SENS_INVAL) { sum += v; n++; } }
     if (n == 0U) { return; }
     if (((sum / n) < p->irr_on_pct) && ((s->since_irr_ms == 0xFFFFFFFFUL) || (s->since_irr_ms >= (uint32_t)p->runoff_wait_s * 1000U)))
-    { irr_start(s, p->irr_s, "moisture-low"); }
+    { if (!irr_water_unsafe(s)) { irr_start(s, p->irr_s, "moisture-low"); } }
     return;
   }
   {                                       /* schedule: irr_per_day events spread over [start_h, end_h) */
     uint16_t day; int32_t sod = local_sod(s, &day);
     int32_t  w0 = (int32_t)p->irr_start_h * 3600, w1 = (int32_t)p->irr_end_h * 3600, iv;
+    if ((sod < 0) && (p->irr_per_day != 0U) && (w1 > w0))
+    {
+      /* a schedule with no clock never fires, and used to say nothing: alarm after 10 min */
+      if (s->noclk_ms < NOCLK_ALARM_MS) { s->noclk_ms += s_dt_ms; }
+      else if (!s->noclk_alarmed)
+      { s->noclk_alarmed = 1U; tank_alarm(s, TAL_CLOCK, 1U, "no clock"); ev(s, "FAULT", "%s no clock (SNTP/RTC): scheduled irrigation is not running", s->tag); }
+      return;
+    }
+    s->noclk_ms = 0U;
+    if (s->noclk_alarmed) { s->noclk_alarmed = 0U; tank_alarm(s, TAL_CLOCK, 0U, NULL); ev(s, "SYSTEM", "%s clock back -> irrigation schedule running", s->tag); }
     if ((sod < 0) || (p->irr_per_day == 0U) || (w1 <= w0)) { return; }
     iv = (w1 - w0) / (int32_t)p->irr_per_day;
     if (day != s->irr_day)
@@ -1274,6 +1543,7 @@ static void irr_sched(ferti_sys_t *s)
       if ((sod >= t) && (sod < t + iv) && !(s->irr_slot_done & (1UL << k)))
       {
         char why[24]; snprintf(why, sizeof why, "slot %u/%u", (unsigned)(k + 1U), (unsigned)p->irr_per_day);
+        if (irr_water_unsafe(s)) { return; }   /* slot stays open: it runs as soon as the water is back in range, or lapses with its window */
         s->irr_slot_done |= (1UL << k);
         irr_start(s, p->irr_s, why);
         return;
@@ -1294,16 +1564,16 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
   uint8_t prev = s->di_prev;
   s->di_prev = (uint8_t)((low ? FERTI_DI_LOW : 0U) | (full ? FERTI_DI_FULL : 0U) | (ovf ? FERTI_DI_OVERFLOW : 0U) |
                          (frsh ? FERTI_DI_FRESH_LOW : 0U) | (rof ? FERTI_DI_RUNOFF : 0U));
-  s->t_ms += TICK_MS;
-  if (s->since_irr_ms != 0xFFFFFFFFUL) { s->since_irr_ms += TICK_MS; }
+  s->t_ms += s_dt_ms;
+  if (s->since_irr_ms != 0xFFFFFFFFUL) { s->since_irr_ms += s_dt_ms; }
 
   /* irrigation pump timing (manual `irr now` works in OFF too) */
   if (s->irr_on)
   {
     if (rof) { s->runoff_seen = 1U; }
-    s->irr_ms_batch += TICK_MS;
+    s->irr_ms_batch += s_dt_ms;
     if (s->mode == M_RELEASE) { irr_stop(s); }
-    else { s->irr_ms_left = (s->irr_ms_left > TICK_MS) ? (s->irr_ms_left - TICK_MS) : 0U; if (s->irr_ms_left == 0U) { irr_stop(s); } }
+    else { s->irr_ms_left = (s->irr_ms_left > s_dt_ms) ? (s->irr_ms_left - s_dt_ms) : 0U; if (s->irr_ms_left == 0U) { irr_stop(s); } }
   }
 
   /* overflow: the normally-closed float opens = reservoir over the brim (or the wire fell off) */
@@ -1317,7 +1587,7 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
     else
     {
       s->m_leak_dl += now_dl - s->m_last_dl;
-      s->m_leak_ms += TICK_MS;
+      s->m_leak_ms += s_dt_ms;
       if ((s->m_leak_dl >= 4U * LEAK_DL) && !s->leak_alarmed)
       { s->leak_alarmed = 1U; tank_alarm(s, TAL_LEAK, 1U, "inlet flow, no irrigation"); ev(s, "FAULT", "%s inlet meter moved %lu.%luL with no irrigation: float valve stuck open or leak", s->tag, (unsigned long)(s->m_leak_dl / 10U), (unsigned long)(s->m_leak_dl % 10U)); }
       if (s->m_leak_ms >= 600000UL) { s->m_leak_dl = 0U; s->m_leak_ms = 0U; }
@@ -1331,7 +1601,7 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
     else
     {
       s->m_leak_dl += now_dl - s->m_last_dl;
-      s->m_leak_ms += TICK_MS;
+      s->m_leak_ms += s_dt_ms;
       if ((s->m_leak_dl >= LEAK_DL) && !s->leak_alarmed)
       { s->leak_alarmed = 1U; tank_alarm(s, TAL_LEAK, 1U, "inlet flow, valve off"); ev(s, "FAULT", "%s inlet meter moved %lu.%luL with the valve off: valve stuck open or leak", s->tag, (unsigned long)(s->m_leak_dl / 10U), (unsigned long)(s->m_leak_dl % 10U)); }
       if (s->m_leak_ms >= LEAK_WIN_MS) { s->m_leak_dl = 0U; s->m_leak_ms = 0U; }
@@ -1363,7 +1633,7 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
          * stay READY and irrigate on schedule. A low float here means the valve failed or the
          * supply is off: no irrigation (pump would run dry), alarm until the level is back. */
         if (s->tstate != T_READY) { tank_goto(s, T_READY); }
-        if (low && pin_ok(b->di_low)) { if (s->low_ms < LOW_DWELL_MS) { s->low_ms += TICK_MS; } }
+        if (low && pin_ok(b->di_low)) { if (s->low_ms < LOW_DWELL_MS) { s->low_ms += s_dt_ms; } }
         else { s->low_ms = 0U; }
         if (s->low_ms >= LOW_DWELL_MS)              /* sustained low: not a splash */
         {
@@ -1402,6 +1672,14 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
           ev(s, "ACTION", "%s refill start (batch %u.%uL, limit %us)", s->tag, (unsigned)(p->batch_dl / 10U), (unsigned)(p->batch_dl % 10U), (unsigned)p->fill_max_s);
         }
       }
+      else if (s->tstate == T_IDLE)
+      {
+        /* Back from off / ack with water already in the reservoir (not low): there is no refill to
+         * wait for, and waiting for one left the system in IDLE for good - no irrigation, no alarm.
+         * Check what is in the tank like a fresh batch, then serve it. */
+        s->verify_n = 0U; s->verify_alarmed = 0U; s->wait_s = 0U;
+        tank_goto(s, T_VERIFY);
+      }
       else if (s->tstate == T_READY)
       {
         /* protections while irrigating from a full reservoir */
@@ -1435,8 +1713,8 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
         ev(s, "SYSTEM", "%s refill done in %lus: %lu.%luL%s (%u ml/s) -> dosing feed-forward, stir", s->tag,
            (unsigned long)(ms / 1000U), (unsigned long)(dl / 10U), (unsigned long)(dl % 10U), metered ? " metered" : "", (unsigned)s->L.fill_mls);
       }
-      else if ((p->fill_max_s != 0U) && (s->t_ms >= (uint32_t)p->fill_max_s * 1000U))
-      { tank_fault(s, TAL_FILL, "fill timeout"); }
+      else if (s->t_ms >= (uint32_t)((p->fill_max_s != 0U) ? p->fill_max_s : DEF_FILL_MAX_S) * 1000U)
+      { tank_fault(s, TAL_FILL, "fill timeout"); }   /* an unset limit means the default, never "no limit": the valve must not stay open on a stuck float */
       break;
     }
 
@@ -1501,16 +1779,25 @@ static void tank_tick(ferti_sys_t *s)         /* 500 ms */
 static void ferti_task(void *arg)
 {
   (void)arg;
+  int wdg = app_wdg_register("dose", 45000U);   /* this task owns the dosing pumps: a hang must end in a reset, not in a pump left ON */
   vTaskDelay(pdMS_TO_TICKS(15000));       /* let the scanner produce first real values */
+  TickType_t t_prev = xTaskGetTickCount();
   for (;;)
   {
+    TickType_t t_now = xTaskGetTickCount();
+    uint32_t dt = (uint32_t)(t_now - t_prev) * (uint32_t)portTICK_PERIOD_MS;
+    t_prev = t_now;
+    s_dt_ms = (dt < TICK_MS) ? TICK_MS : ((dt > 60000U) ? 60000U : dt);   /* first pass / clamp */
+    app_wdg_checkin(wdg);
     for (uint8_t k = 0; k < s_n; k++)
     {
       ferti_sys_t *s = s_sys[k];
+      sys_lock();
       if (!s->ploaded) { cfg_load(s); learn_load(s); }   /* covers a late fs mount */
       if (pin_ok(s->b->fill) || pin_ok(s->b->irr)) { tank_tick(s); }
       chem_tick(s);
       if (s->evl == 0U) { if (s->runoff_age_s != 0xFFFFFFFFUL) { s->runoff_age_s += 5U; } }
+      sys_unlock();
     }
     vTaskDelay(pdMS_TO_TICKS(TICK_MS));
   }
@@ -1533,11 +1820,11 @@ const char *ferti_hb(ferti_sys_t *s)
                  (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), ph); }
   if ((s->tstate != T_NONE) && (n > 0) && ((size_t)n < cap))
   {
-    n += snprintf(b + n, cap - (size_t)n, " T:%s%s", s_tname[s->tstate], s->irr_on ? "+irr" : "");
+    n = app_sncat(b, (uint16_t)n, cap, " T:%s%s", s_tname[s->tstate], s->irr_on ? "+irr" : "");
     if (s->L.irr_last != 0U)                     /* last irrigation start, local HH:MM (the record) */
     {
       int64_t ll = (int64_t)s->L.irr_last + (int64_t)s->p.tz_min * 60; int32_t sod = (int32_t)(ll % 86400);
-      n += snprintf(b + n, cap - (size_t)n, " li:%02ld:%02ld", (long)(sod / 3600), (long)((sod % 3600) / 60));
+      n = app_sncat(b, (uint16_t)n, cap, " li:%02ld:%02ld", (long)(sod / 3600), (long)((sod % 3600) / 60));
     }
     if ((s->ec_runoff != (uint16_t)SENS_INVAL) && ((size_t)n < cap))
     { snprintf(b + n, cap - (size_t)n, " ro:%u/%u@%lus", (unsigned)s->ec_runoff, (unsigned)s->ph_runoff, (unsigned long)s->runoff_age_s); }
@@ -1586,7 +1873,20 @@ static int pump_by_name(const ferti_sys_t *s, const char *t, int len)
 
 static const char *dir_name(uint8_t d) { return (d == 0U) ? "both" : ((d == 1U) ? "base" : "acid"); }
 
-int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_t cap)
+/* A manual shot obeys the same 24 h cap as the loop (2026-11-17). It used to be counted but never
+ * refused, so the cap bounded the controller and not a script or a mistyped command repeating
+ * `dose a 200`. Refused shots do not start a hold; `dose cap` is the deliberate way to make room. */
+static int manual_fits(ferti_sys_t *s, uint8_t pump, uint32_t ml, char *out, uint16_t cap)
+{
+  uint8_t  slot = (pump <= P_B) ? P_A : pump;
+  uint32_t room = cap_room(s, slot);
+  if (ml <= room) { return 1; }
+  snprintf(out, cap, "dose: %s 24h cap %u ml leaves %lu ml - shot refused (`dose cap` changes the cap)",
+           cap_name(s, slot), (unsigned)s->p.cap_ml[slot], (unsigned long)room);
+  return 0;
+}
+
+static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_t cap)
 {
   ferti_param_t *p = &s->p;
   const char *tag = s->tag;
@@ -1615,11 +1915,13 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
   if ((nt == 0) || (strcmp(t1, "stat") == 0)) { /* status below */ }
   else if (strcmp(t1, "auto") == 0)
   {
-    caps_clear(s);                           /* operator re-arm = fresh 24 h window (any hold lifts on the next tick) */
+    if (s->tstate == T_FAULT) { snprintf(out, cap, "dose: tank FAULT (%s) - clear the cause, then `dose ack` before auto", s->fault_why); return 1; }
+    /* the 24 h record is NOT cleared here any more (2026-11-17): re-arming after a tube-out / empty-stock
+     * hold handed out a second full allowance. `dose cap clear` is the explicit override. */
     if (s->off_al) { s->off_al = 0U; dose_alarm(s, AL_OFF, 0U); }
     s->wait_s = 0; s->ff_ph = 0; s->ff_ec = 0; s->last.kind = K_IDLE; s->confound = 1U;
     s->acc_dph = 0; s->acc_dec = 0; s->acc_dose_ph = 0; s->acc_dose_ec = 0; s->acc_t = 0;
-    memset(s->strikes, 0, sizeof(s->strikes));
+    memset(s->strikes, 0, sizeof(s->strikes)); memset(s->nr_exp, 0, sizeof(s->nr_exp)); s->ph_alone = 0U;
     s->mode = M_AUTO;
     cfg_save(s);                             /* boot mode rides the cfg since 2026-09-02 */
     evs("CONFIG", src, "%s auto (ec %u±%u ph %u±%u shots %u/%u/%uml mix %lus)", tag,
@@ -1632,7 +1934,10 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
   else if (strcmp(t1, "stop") == 0)
   { shots_abort(s); s->irr_on = 0U; s->mode = M_OFF; cfg_save(s); evs("ACTION", src, "%s STOP (pumps off)", tag); }
   else if (strcmp(t1, "release") == 0)
-  { shots_abort(s); s->mode = M_RELEASE; cfg_save(s); evs("CONFIG", src, "%s released (coils to dashboard)", tag); }
+  {
+    shots_abort(s); s->mode = M_RELEASE; cfg_save(s); evs("CONFIG", src, "%s released (coils to dashboard)", tag);
+    s->g_ec.tr = (uint16_t)SENS_INVAL; s->g_ec.n = 0U; s->g_ph.tr = (uint16_t)SENS_INVAL; s->g_ph.n = 0U;   /* nothing is sampled while released: start the gate afresh afterwards */
+  }
   else if (strcmp(t1, "cal") == 0)
   {
     int k = pump_by_name(s, t2, (int)strlen(t2));
@@ -1743,7 +2048,7 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
       uint32_t seed = (slot <= 2U) ? s->seed_gain[slot] : 1U;
       if ((slot > 2U) || (v < seed / 5UL) || (v > seed * 5UL))
       { snprintf(out, cap, "dose learn ab|acid|base <x1000/ml> (within 1/5..5x of seed) | reset"); return 1; }
-      s->L.gain[slot] = (uint32_t)v; learn_seed_sums(s, slot); s->strikes[slot] = 0; learn_save(s);
+      s->L.gain[slot] = (uint32_t)v; learn_seed_sums(s, slot); s->strikes[slot] = 0; s->nr_exp[slot] = 0; learn_save(s);
       evs("CONFIG", src, "%s learn %s gain set %lu", tag, t2, (unsigned long)v);
     }
     snprintf(out, cap, "%s learn: gain(x1000/ml) ab=%lu acid=%lu base=%lu (over %ld/%ld/%ldml) drift(x1000/h) ph=%ld ec=%ld ff ph=%ld ec=%ld strikes=%u/%u/%u unlearned=%u/%u last=%u wait=%lus win=%lumin ph%+ld ec%+ld topup=%s owed=%lduS fill=%u.%uL tank=%uL avg ec=%u ph=%u",
@@ -1758,13 +2063,18 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
              (unsigned)s->ec_avg, (unsigned)s->ph_avg);
     return 1;
   }
+  else if ((strcmp(t1, "cap") == 0) && (strcmp(t2, "clear") == 0))   /* operator override: zero the 24 h record (a hold lifts on the next tick) */
+  {
+    caps_clear(s);
+    evs("CONFIG", src, "%s cap clear: 24h record zeroed by the operator", tag);
+  }
   else if (strcmp(t1, "cap") == 0)           /* 24 h rolling caps per pump */
   {
     if ((strcmp(t2, "ab") == 0) && (v >= 50UL) && (v <= CAP_MAX_AB_ML))         { p->cap_ml[P_A] = (uint16_t)v; p->cap_ml[P_B] = (uint16_t)v; }
     else if ((strcmp(t2, "acid") == 0) && (v >= 5UL) && (v <= CAP_MAX_PH_ML))   { p->cap_ml[P_ACID] = (uint16_t)v; }
     else if ((strcmp(t2, "base") == 0) && (v >= 5UL) && (v <= CAP_MAX_PH_ML))   { p->cap_ml[P_BASE] = (uint16_t)v; }
     else if (s->ph_single && (strcmp(t2, "ph") == 0) && (v >= 5UL) && (v <= CAP_MAX_PH_ML)) { p->cap_ml[P_ACID] = (uint16_t)v; p->cap_ml[P_BASE] = (uint16_t)v; }
-    else { snprintf(out, cap, "dose cap ab <50..%u> | acid|base%s <5..%u> (ml per rolling 24h)", CAP_MAX_AB_ML, s->ph_single ? "|ph" : "", CAP_MAX_PH_ML); return 1; }
+    else { snprintf(out, cap, "dose cap ab <50..%u> | acid|base%s <5..%u> (ml per rolling 24h) | clear", CAP_MAX_AB_ML, s->ph_single ? "|ph" : "", CAP_MAX_PH_ML); return 1; }
     cfg_save(s);
     evs("CONFIG", src, "%s cap %s %luml/24h", tag, t2, v);
   }
@@ -1780,8 +2090,9 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
   else if (strcmp(t1, "ab") == 0)
   {
     if (s->mode == M_RELEASE) { snprintf(out, cap, "dose: released — `dose off` first"); return 1; }
-    if ((v < 1UL) || (v > MAN_MAX_ML)) { snprintf(out, cap, "dose ab <1..%u ml>", MAN_MAX_ML); return 1; }
+    if ((nt != 2) || (v < 1UL) || (v > MAN_MAX_ML)) { snprintf(out, cap, "dose ab <1..%u ml>", MAN_MAX_ML); return 1; }   /* nt != 2: a trailing extra number used to BE the volume */
     if (s->qn > (uint8_t)(QLEN - 2U)) { snprintf(out, cap, "dose: queue full"); return 1; }
+    if (!manual_fits(s, P_A, (uint32_t)v, out, cap)) { return 1; }
     (void)shot_queue(s, P_A, (uint16_t)v, src, "manual");
     (void)shot_queue(s, P_B, (uint16_t)v, src, "manual");
   }
@@ -1875,7 +2186,8 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
     { snprintf(out, cap, "dose: a|b|%s|ab <ml> | stop|auto|off|release | cal|shot|cap|ec|ph|phdir|mix|tank|learn|phsrc|phdiv|ecsrc|ecdiv | topup|batch|fill|stir|verify|irr|runoff|tz|ack",
                s->ph_single ? "ph" : "acid|base"); return 1; }
     if (s->mode == M_RELEASE) { snprintf(out, cap, "dose: released — `dose off` first"); return 1; }
-    if ((v < 1UL) || (v > maxml)) { snprintf(out, cap, "dose %s <1..%lu ml>", pump_name(s, (uint8_t)k), maxml); return 1; }
+    if ((nt != 2) || (v < 1UL) || (v > maxml)) { snprintf(out, cap, "dose %s <1..%lu ml>", pump_name(s, (uint8_t)k), maxml); return 1; }   /* `dose acid 5 15` used to dose 15 */
+    if (!manual_fits(s, (uint8_t)k, (uint32_t)v, out, cap)) { return 1; }
     if (shot_queue(s, (uint8_t)k, (uint16_t)v, src, "manual") != 0)
     { snprintf(out, cap, "dose: queue full"); return 1; }
   }
@@ -1910,6 +2222,15 @@ int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_
     }
   }
   return 1;
+}
+
+int ferti_cmd(ferti_sys_t *s, const char *a, const char *src, char *out, uint16_t cap)
+{
+  int r;
+  sys_lock();
+  r = ferti_cmd_body(s, a, src, out, cap);
+  sys_unlock();
+  return r;
 }
 
 /* ---- compatibility shell: "dose [<system>] ..." from CLI and cloud ---- */
@@ -1960,11 +2281,13 @@ int ferti_open(ferti_sys_t *s, const ferti_bind_t *b)
   {
     snprintf(s->tag, sizeof s->tag, "dose"); snprintf(s->evsrc, sizeof s->evsrc, "dose");
     snprintf(s->cfg_file, sizeof s->cfg_file, "dose.cfg"); snprintf(s->lrn_file, sizeof s->lrn_file, "dose.lrn");
+    snprintf(s->use_file, sizeof s->use_file, "dose.use");
   }
   else
   {
     snprintf(s->tag, sizeof s->tag, "dose %s", b->name); snprintf(s->evsrc, sizeof s->evsrc, "dose.%s", b->name);
     snprintf(s->cfg_file, sizeof s->cfg_file, "dose_%s.cfg", b->name); snprintf(s->lrn_file, sizeof s->lrn_file, "dose_%s.lrn", b->name);
+    snprintf(s->use_file, sizeof s->use_file, "dose_%s.use", b->name);
   }
   seed_param(b->kind, &s->p);
   seed_gain(b->kind, s->seed_gain);
@@ -1974,6 +2297,7 @@ int ferti_open(ferti_sys_t *s, const ferti_bind_t *b)
   s->mode = M_OFF; s->run = -1; s->confound = 1U;
   s->ec = (uint16_t)SENS_INVAL; s->ph = (uint16_t)SENS_INVAL; s->ec_avg = (uint16_t)SENS_INVAL; s->ph_avg = (uint16_t)SENS_INVAL;
   s->tu_ec0 = (uint16_t)SENS_INVAL; s->ec_runoff = (uint16_t)SENS_INVAL; s->ph_runoff = (uint16_t)SENS_INVAL;
+  s->g_ec.tr = (uint16_t)SENS_INVAL; s->g_ph.tr = (uint16_t)SENS_INVAL; s->ec_raw = (uint16_t)SENS_INVAL; s->ph_raw = (uint16_t)SENS_INVAL;
   s->since_irr_ms = 0xFFFFFFFFUL; s->runoff_age_s = 0xFFFFFFFFUL;
   s->tstate = pin_ok(b->fill) ? T_IDLE : (pin_ok(b->irr) ? T_READY : T_NONE);   /* no fill actuator: a float valve refills, irrigation never waits */
   s_sys[s_n++] = s;
@@ -1986,5 +2310,6 @@ void ferti_start(void)
 {
   if (s_started) { return; }
   s_started = 1U;
+  s_mtx = xSemaphoreCreateMutexStatic(&s_mtx_buf);
   xTaskCreate(ferti_task, "dose", 896, NULL, APP_TASK_PRIO_LOW, NULL);
 }

@@ -11,6 +11,7 @@
 #ifndef APP_PLATFORM_H
 #define APP_PLATFORM_H
 #include <stdint.h>
+#include <stddef.h>
 
 /* ---- Modbus ports ----
  * The front-panel RS-485 connectors and the internal backplane expansion bus
@@ -45,6 +46,23 @@ int app_mbport_configure(uint8_t port, uint8_t role, uint32_t baud,
 int app_mbport_master(uint8_t port, uint8_t slave_addr,
                       const uint8_t *pdu, uint16_t pdu_len,
                       uint8_t *rsp, uint16_t rsp_cap);
+
+/* Bounded string append: formats at buf[n], never writes past buf[cap-1], always NUL-terminates.
+ * Returns the new length; once the buffer is full it stays at cap-1 (output is cut, memory is safe).
+ * Use it instead of `n += snprintf(buf + n, cap - n, ...)`: snprintf returns the length it WANTED
+ * to write, so after one truncation n passes cap, cap - n wraps to a huge size_t and the next call
+ * writes out of bounds. */
+uint16_t app_sncat(char *buf, uint16_t n, size_t cap, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+
+/* Task check-in watchdog. The hardware watchdog is fed by the platform main loop, so on its own it
+ * only proves that loop is alive: a control task that hangs with an output ON would go unnoticed.
+ * A task that owns actuators registers once and then checks in every pass of its loop; if it stays
+ * silent longer than max_gap_ms the platform journals "task stalled: <name>" and resets (outputs
+ * drop to their safe state on reboot). Choose max_gap_ms well above the task's worst legitimate
+ * blocking time (file I/O, Modbus timeouts); 30 s suits a 0.5..5 s control loop.
+ * app_wdg_register returns a handle (>= 0) or -1 when the table (8 tasks) is full. */
+int  app_wdg_register(const char *name, uint32_t max_gap_ms);
+void app_wdg_checkin(int handle);
 
 /* Convenience Modbus master helpers. `port` = any APP_PORT_* (front 485 or backplane).
  * Return 0 on success; <0 on error (a Modbus exception code E is returned as -(100+E)).

@@ -406,8 +406,31 @@ int uart_set_line(uart_drv_t *u, uint32_t baud, uint32_t parity, uint32_t stopbi
 }
 
 /* ---- Transmit ---- */
+/* TX watchdog (thread context only). tx_busy is cleared by the TC callback alone; a TX DMA error
+ * or an abort that lands mid-frame means TC never fires, tx_busy stays 1 and every later
+ * uart_write returns 0 for good (and a GPIO-driven DE keeps holding the bus). This is the
+ * transmit-side twin of the 2026-08-22 RX wedge. A frame that is still "busy" well past its own
+ * wire time is declared lost: abort the transmit, drop DE, free the port. */
+static void tx_release(uart_drv_t *u)
+{
+  if (u->cfg.de_mode == UARTDRV_DE_GPIO)
+  {
+    HAL_GPIO_WritePin(u->cfg.de_port, u->cfg.de_pin, GPIO_PIN_RESET);
+  }
+  u->tx_busy = 0;
+}
+
+static void tx_watchdog(uart_drv_t *u)
+{
+  if ((!u->tx_busy) || ((HAL_GetTick() - u->tx_t0) <= (uint32_t)u->tx_budget_ms)) { return; }
+  (void)HAL_UART_AbortTransmit(&u->huart);
+  tx_release(u);
+  u->stats.tx_stuck++;
+}
+
 uint16_t uart_write(uart_drv_t *u, const void *d, uint16_t n)
 {
+  tx_watchdog(u);
   if (u->tx_busy) { u->stats.tx_reject++; return 0; }
   if (n == 0U) { return 0; }
   if (u->cfg.de_mode == UARTDRV_DE_GPIO)
@@ -418,6 +441,9 @@ uint16_t uart_write(uart_drv_t *u, const void *d, uint16_t n)
   {
     if (n > u->cfg.txlen) { n = u->cfg.txlen; }
     memcpy(u->cfg.txbuf, d, n);                 /* source must stay resident during DMA -> port-private buffer */
+    { uint32_t ms = ((uint32_t)n * 12000U) / ((u->cfg.baud != 0U) ? u->cfg.baud : 9600U);   /* 12 bit times per byte, worst framing */
+      u->tx_budget_ms = (uint16_t)((ms > 60000U) ? 60000U : (ms + 20U));
+      u->tx_t0 = HAL_GetTick(); }
     u->tx_busy = 1;
     if (HAL_UART_Transmit_DMA(&u->huart, u->cfg.txbuf, n) != HAL_OK)
     {
@@ -501,15 +527,18 @@ uint16_t uart_read_frame(uart_drv_t *u, void *d, uint16_t cap)
  * bus thread's ~1ms loop, so the whole ladder plays out within ~20ms. */
 void uart_heal(uart_drv_t *u)
 {
+  tx_watchdog(u);                               /* same owner thread, same cadence: a lost TX completion is healed here too */
   if (!u->rx_dead) { return; }
   u->heal_tries++;
   if (u->heal_tries == 8U)
   {
     (void)HAL_UART_Abort(&u->huart);            /* plain re-arm keeps being refused: clear whatever HAL thinks is running */
+    if (u->tx_busy) { tx_release(u); u->stats.tx_stuck++; }   /* the abort killed any frame in flight: its TC will never come */
   }
   else if (u->heal_tries >= 16U)
   {
     (void)HAL_UART_Abort(&u->huart);            /* still stuck: rebuild the peripheral from the saved config */
+    if (u->tx_busy) { tx_release(u); u->stats.tx_stuck++; }
     (void)HAL_UART_DeInit(&u->huart);
     if (u->cfg.de_mode == UARTDRV_DE_HW)
     {

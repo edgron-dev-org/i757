@@ -57,7 +57,7 @@ Mounting forms:
 
 ### 4.1 Link Parameters
 
-- **Slave address**: DIP + 1 (1–16), see §3; address 0 = broadcast (write-type function codes only; executed without a response);
+- **Slave address**: DIP + 1 (1–16), see §3; address 0 = broadcast (write-type function codes only; executed without a response; **from firmware v2.10 writes to the configuration area 0x0200–0x02FF, including save and factory reset, are not executed on the broadcast address** — configuration and calibration must be sent to one address at a time);
 - **Serial format**: 8 data bits, no parity, 1 stop bit (8N1);
 - **Baud rate**: **4800 / 9600 (factory default) / 19200 / 38400 / 57600 / 115200 / 250K / 500K / 1M**; changing it: see 4.3;
 - **Supported function codes**: FC01 (read coils), FC05 (write single coil), FC15 (write multiple coils), FC03 (read holding), FC04 (read input), FC06 (write single register), FC16 (write multiple registers);

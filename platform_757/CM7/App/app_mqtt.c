@@ -11,6 +11,7 @@
  * broker strategy: public first, auto switch sides after 2 consecutive failures; a connect attempt stuck for 20s (SYN black hole) is force-aborted and counts as one failure;
  * downlink broker-pub / broker-lan force a switch. Does not depend on DHCP result (under an ICS topology a static fallback still has a NAT public path). */
 #include "app_mqtt.h"
+#include "app_platform.h"   /* app_sncat */
 #include "app_bsp.h"       /* 757: App-directory LED shim */
 #include "app_identity.h"  /* app_fwkey2_fp: heartbeat "fwk2" */
 extern const char *app_p5_str(void);   /* 757: storage self-test result (app_p5_test.c) */
@@ -272,6 +273,23 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
         s_reboot_why = "cloud reboot";
         s_reboot_cnt = 5;                        /* mqtt main loop 500ms beats: reset in ~2.5s */
       }
+      else if (strncmp(s_cmd_buf, "broker-lan", 10) == 0)
+      {
+        /* Refused from the cloud (2026-11-17): the LAN broker is the plaintext bench broker, and a
+         * remote command must not be able to move a deployed board off TLS. The USB console still
+         * accepts it (app_usb_fw.c passthrough), which is where bench work happens. */
+        extern void app_log_event_src(const char *type, const char *src, const char *fmt, ...);
+        app_log_event_src("SYSTEM", "cloud", "broker-lan refused (USB console only)");
+      }
+      else if (strncmp(s_cmd_buf, "mota-flash ", 11) == 0)
+      {
+        /* Deferred to the mqtt main loop (2026-11-17). Streaming a module image takes seconds and,
+         * on a noisy backplane with retries, over a minute; run here it would sit on the tcpip
+         * thread (priority above defaultTask, the only watchdog feeder) and the 32 s IWDG would
+         * reset the controller in the middle of flashing a module. */
+        extern volatile uint8_t s_mota_flash_pend;
+        s_mota_flash_pend = (uint8_t)(0x80U | ((uint8_t)strtoul(s_cmd_buf + 11, 0, 10) & 0x7FU));
+      }
       else { ota_cmd(s_cmd_buf, s_cmd_fill); }
       s_cmd_fill = 0;
     }
@@ -279,6 +297,7 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
 }
 /* deferred mbr/mbw + datalog commands (see above): executed in the mqtt task, result lands in the heartbeat */
 volatile uint8_t s_mbreg_pend = 0;
+volatile uint8_t s_mota_flash_pend = 0;   /* cloud "mota-flash <addr>": 0x80|addr, executed by the mqtt main loop */
 volatile uint8_t s_reboot_cnt = 0;   /* cloud "reboot": armed by the downlink callback, counted down and fired by the mqtt main loop */
 const char *s_reboot_why = "deferred reboot";   /* breadcrumb for the reset that s_reboot_cnt fires */
 char s_mbreg_cmd[160];   /* sized for "note <text<=120B>" */
@@ -362,6 +381,7 @@ static const char DESC_TAIL[] =
 /* head+mid+tail + sn twice + up to 8 module blocks (group ~80B + three diag points ~330B
  * + eight PH_EC engineering points ~1000B or EX_16DI bitmap+16 counters ~1800B for the
  * modules that have them; per-module budget = the largest block) */
+__attribute__((section(".axisram")))   /* 22 KB: moved out of main RAM (96 % full) into AXI SRAM, 2026-11-17. NOLOAD = not zeroed; valid length is s_desc_len */
 static char s_desc_buf[sizeof(DESC_HEAD) + sizeof(DESC_G_SYS) + sizeof(DESC_G_NET) + sizeof(DESC_MID) + sizeof(DESC_TAIL) + 2U * DEV_SN_MAX + 8U * 2240U];
 static u16_t s_desc_len = 0;
 
@@ -380,43 +400,43 @@ static void desc_build(void)
     unsigned a = app_diag_mod_addr(mods, i);
     if (app_diag_mod_type(mods, i) == 2U)   /* PH_EC: measurements card ("m<addr>" = health) */
     {
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
              ",{\"id\":\"m%up\",\"name\":\"Slot %u: PH_EC Measurements\"}", a, a);
     }
     if (app_diag_mod_type(mods, i) == 3U)   /* EX_16DI: inputs/counters card */
     {
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
              ",{\"id\":\"m%up\",\"name\":\"Slot %u: DI Inputs\"}", a, a);
     }
     if (app_diag_mod_type(mods, i) == 5U)   /* EX_8AI: analog inputs card */
     {
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
              ",{\"id\":\"m%up\",\"name\":\"Slot %u: Analog Inputs\"}", a, a);
     }
   }
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, "%s",
+  n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf), "%s",
                        ({ extern const char *app_user_desc_groups(void); app_user_desc_groups(); }));   /* 485E field sensor cards (app_user.c): process cards before System (2026-11-09) */
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_G_SYS);
+  n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf), DESC_G_SYS);
   for (uint16_t i = 0; i < nm; i++)         /* health cards, address order, after System */
   {
     unsigned a = app_diag_mod_addr(mods, i), fw = app_diag_mod_fw(mods, i);
-    n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+    n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
            ",{\"id\":\"m%u\",\"name\":\"Slot %u: %s v%u.%u\"}",
            a, a, app_diag_mod_typename(app_diag_mod_type(mods, i)), fw >> 8, fw & 0xFFU);
   }
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_G_NET);
+  n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf), DESC_G_NET);
   /* DESC_MID carries ONE %s inside the points array (after dose.state): the dosing cards of the
    * other fertigation systems. It must be fed here — DESC_MID is a const char array, so the
    * compiler cannot check the argument list; the first two-system board (i757-608a, 2026-10-27)
    * shipped a desc with that %s reading a stray stack pointer into this very buffer: the JSON
    * self-copied, the dash kept the stale desc and the new PH_EC card never appeared. */
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_MID,
+  n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf), DESC_MID,
                        ({ extern const char *ferti_desc_more(void); ferti_desc_more(); }),
                        ({ extern const char *app_user_desc_points(void); app_user_desc_points(); }));   /* 485E field sensors */
   for (uint16_t i = 0; i < nm; i++)
   {
     unsigned a = app_diag_mod_addr(mods, i);
-    n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+    n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
            ",{\"id\":\"m%u.cpu\",\"name\":\"CPU\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%%\",\"group\":\"m%u\",\"f\":\"m%ucpu\"}"
            ",{\"id\":\"m%u.stkmin\",\"name\":\"Min Stack\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"B\",\"group\":\"m%u\",\"f\":\"m%ustk\"}"
            ",{\"id\":\"m%u.tsk\",\"name\":\"Tasks\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"m%u\",\"f\":\"m%utsk\"}",
@@ -424,7 +444,7 @@ static void desc_build(void)
     if (app_diag_mod_type(mods, i) == 2U)   /* PH_EC: engineering-value points (module spec §2),
                                              * grouped on the process card m<addr>p */
     {
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
            ",{\"id\":\"m%u.ph1\",\"name\":\"pH 1\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uph1\",\"scale\":0.01}"
            ",{\"id\":\"m%u.ph2\",\"name\":\"pH 2\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uph2\",\"scale\":0.01}"
            ",{\"id\":\"m%u.ec1\",\"name\":\"EC 1\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"µS/cm\",\"group\":\"m%up\",\"f\":\"m%uec1\"}"
@@ -438,12 +458,12 @@ static void desc_build(void)
     if (app_diag_mod_type(mods, i) == 3U)   /* EX_16DI: level bitmap + 16 counters (spec §3,
                                              * contract v0.25), grouped on process card m<addr>p */
     {
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
            ",{\"id\":\"m%u.di\",\"name\":\"DI Inputs\",\"kind\":\"bits\",\"width\":16,\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%udi\"}",
            a, a, a);
       for (unsigned k = 1; k <= 16U; k++)
       {
-        n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+        n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
              ",{\"id\":\"m%u.c%u\",\"name\":\"Counter DI%u\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uc%u\"}",
              a, k, k, a, a, k);
       }
@@ -460,16 +480,17 @@ static void desc_build(void)
       {
         uint8_t t = app_diag_mod_aitype(mods, i, (uint8_t)(k - 1U));
         uint8_t ma = (uint8_t)((t == 1U) || (t == 2U));
-        n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+        n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
              ",{\"id\":\"m%u.a%u\",\"name\":\"AI %u (%s)\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%s\",\"group\":\"m%up\",\"f\":\"m%ua%u\",\"scale\":%s}",
              a, k, k, rng[t & 3U], ma ? "mA" : "V", a, a, k, ma ? "0.01" : "0.001");
       }
-      n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n,
+      n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf),
            ",{\"id\":\"m%u.ast\",\"name\":\"AI Faults (open loop / over-range)\",\"kind\":\"bits\",\"width\":8,\"rw\":\"ro\",\"group\":\"m%up\",\"f\":\"m%uast\"}",
            a, a, a);
     }
   }
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_TAIL);
+  n = app_sncat(s_desc_buf, (uint16_t)n, sizeof(s_desc_buf), DESC_TAIL);
+  if (n >= (sizeof(s_desc_buf) - 1U)) { printf("desc: buffer full (%u B), descriptor cut\n\r", (unsigned)sizeof(s_desc_buf)); }
   s_desc_len = n;
 }
 
@@ -866,6 +887,7 @@ void mqtt_app_task(void)
       if (!p5done) { extern void app_p5_test_run(void); app_p5_test_run(); p5done = 1U;
                      extern void app_pf_init(void); app_pf_init(); } }   /* power-fail detection armed (after QSPI) */
     { extern void app_p0_hb_tick(void); app_p0_hb_tick(); }  /* 757: SRAM4 0x180 heartbeat (read by CM4 CLI stat) */
+    { extern void app_wdg_poll(void); app_wdg_poll(); }   /* registered control tasks must have checked in (app_platform.h) */
     app_iwdg_feed();   /* 32s watchdog (started in app_init.c): a hang/HardFault in this loop -> reset -> trial-period count bites a rollback */
 #ifdef OTA_TEST_HANG   /* verification matrix #4: deliberately deadloop 10s after boot (no feed) -> IWDG bites at 32s -> reset loop -> 4th boot auto-rolls back */
     if (tick >= 20U) { printf("[TEST] deliberate hang NOW (IWDG bites in ~32s)\n\r"); for (;;) { } }
@@ -984,6 +1006,13 @@ void mqtt_app_task(void)
       }
       s_mbreg_pend = 0;
       s_status_dirty = 1;                      /* result rides the next heartbeat ("cmdr") */
+    }
+    if (s_mota_flash_pend != 0U)               /* deferred cloud mota-flash (see the downlink handler) */
+    {
+      extern int mota_flash(uint8_t addr);
+      uint8_t a = (uint8_t)(s_mota_flash_pend & 0x7FU);
+      s_mota_flash_pend = 0;
+      (void)mota_flash(a);
     }
     TICK_CHECK(4);   /* stage 4 = ota_poll + deferred cloud commands (mbr/mbw/dose/vent/flow/hsdi/netcfg/datalog) */
     if (s_reboot_cnt != 0U)                    /* cloud "reboot", deferred past the QoS1 PUBACK (see downlink handler) */

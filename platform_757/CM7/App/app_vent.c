@@ -474,9 +474,11 @@ static void vent_tick(void)
 static void vent_task(void *arg)
 {
   (void)arg;
+  int wdg = app_wdg_register("vent", 60000U);   /* owns the roof-window motor relays */
   vTaskDelay(pdMS_TO_TICKS(15000));   /* let the scanner produce first real values */
   for (;;)
   {
+    app_wdg_checkin(wdg);
     vent_load();                      /* no-op once loaded; covers a late fs mount */
     vent_tick();
     vTaskDelay(pdMS_TO_TICKS(VENT_TICK_S * 1000U));

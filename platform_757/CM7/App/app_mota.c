@@ -84,7 +84,7 @@ void mota_fw_chunk(const uint8_t *data, uint16_t len, uint8_t last)
   }
 }
 
-/* ---- streaming: littlefs repository file -> slave spare bank (blocks defaultTask ~3s, within IWDG 32s) ---- */
+/* ---- streaming: littlefs repository file -> slave spare bank (blocks defaultTask: ~3 s clean, far longer with retries; the watchdog is fed per accepted block) ---- */
 static int mota_poll_status(uint8_t addr, uint8_t want, uint32_t timeout_ms)
 {
   uint32_t t0 = HAL_GetTick();
@@ -179,6 +179,10 @@ int mota_flash(uint8_t addr)
     }
     if (tries == 3) { printf("[MOTA] block %u FAIL\n\r", (unsigned)seq); app_log_event("SYSTEM", "mota m%u block %u FAIL", (unsigned)addr, (unsigned)seq); (void)lfs_file_close(l, &f); return -4; }
     off += (uint32_t)n; seq++;
+    { extern void app_iwdg_feed(void); app_iwdg_feed(); }   /* one accepted block = real progress. This call blocks the
+                                                             * watchdog-feeding task for the whole stream; a bad backplane
+                                                             * (most blocks retried) stretches it past the 32 s IWDG. Fed only
+                                                             * on progress: a block that never gets through still ends in -4. */
     if ((seq & 31U) == 0U) { printf("[MOTA] %lu/%lu\n\r", (unsigned long)off, (unsigned long)size); }
   }
   (void)lfs_file_close(l, &f);

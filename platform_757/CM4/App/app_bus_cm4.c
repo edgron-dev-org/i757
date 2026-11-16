@@ -30,6 +30,29 @@ extern void app_rpc_cm4_poll(void);               /* app_rpc_cm4.c: pump inter-c
 
 static osMutexId_t s_lock[BUS_N];
 
+/* Liveness of the worker threads (7 buses + rpc). The IWDG2 feeder is the main task, which no
+ * longer does any bus work: without this a wedged bus thread (the backplane scanner that refreshes
+ * every output module, say) would freeze its outputs while the watchdog kept being fed. */
+static volatile uint32_t s_spin[BUS_N + 1U];
+static uint8_t s_started[BUS_N + 1U];
+#define BUS_STALL_S  20U               /* worst legitimate block: bus-mutex wait <= 1 s + wire <= 1 s per transaction */
+
+uint8_t bus_cm4_alive(void)            /* main task, once a second: 0 = some thread has not spun for BUS_STALL_S */
+{
+  static uint32_t seen[BUS_N + 1U];
+  static uint8_t  quiet[BUS_N + 1U];
+  uint8_t ok = 1U;
+  for (uint8_t i = 0; i <= BUS_N; i++)
+  {
+    uint32_t v = s_spin[i];
+    if (!s_started[i]) { continue; }
+    if (v != seen[i]) { seen[i] = v; quiet[i] = 0U; }
+    else if (quiet[i] < 255U) { quiet[i]++; }
+    if (quiet[i] >= BUS_STALL_S) { ok = 0U; }
+  }
+  return ok;
+}
+
 void bus_cm4_lock(uint8_t bus)     /* called by the leaf transaction/service functions */
 {
   if ((bus < BUS_N) && (s_lock[bus] != NULL)) { (void)osMutexAcquire(s_lock[bus], osWaitForever); }
@@ -45,7 +68,7 @@ void bus_cm4_unlock(uint8_t bus)
 static void rpc_thread(void *arg)
 {
   (void)arg;
-  for (;;) { app_rpc_cm4_poll(); osDelay(1); }
+  for (;;) { app_rpc_cm4_poll(); s_spin[BUS_N]++; osDelay(1); }
 }
 
 static void bus_thread(void *arg)
@@ -64,6 +87,7 @@ static void bus_thread(void *arg)
     }
     pscan_cm4_service_bus(bus);        /* master-role scan entries that are due on this bus */
     PIMG->st.cycle_us[bus]++;          /* loop counter: proves whether this thread is spinning */
+    s_spin[bus]++;
     osDelay(1);
   }
 }
@@ -87,14 +111,14 @@ void bus_cm4_start(void)
     a.name = names[b];
     a.stack_size = BUS_STACK;
     a.priority = (osPriority_t)osPriorityBelowNormal;   /* below the main task: never starve RPMsg/watchdog */
-    if (osThreadNew(bus_thread, (void *)(uint32_t)b, &a) != NULL) { started++; }
+    if (osThreadNew(bus_thread, (void *)(uint32_t)b, &a) != NULL) { started++; s_started[b] = 1U; }
   }
   {
     osThreadAttr_t a = {0};
     a.name = "rpcCM4";
     a.stack_size = BUS_STACK;
     a.priority = (osPriority_t)osPriorityNormal;   /* above the bus threads: keep CM7 responsive */
-    if (osThreadNew(rpc_thread, NULL, &a) != NULL) { started++; }
+    if (osThreadNew(rpc_thread, NULL, &a) != NULL) { started++; s_started[BUS_N] = 1U; }
   }
   BUS_BREADCRUMB = (0xB0000000UL | started);   /* expect 0xB0000008 (7 buses + rpc) */
 }

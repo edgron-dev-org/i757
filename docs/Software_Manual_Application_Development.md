@@ -307,6 +307,7 @@ app_mb_write_single (APP_PORT_485B, 1, 0x0002, 1234);      /* FC06: write one re
 uint16_t vals[3] = { 1, 2, 3 };
 app_mb_write_multi  (APP_PORT_485B, 1, 0x0000, 3, vals);   /* FC16: write three regs */
 ```
+> **Return value corrected (2026-11-17)**: the four write helpers (`app_mb_write_single` / `app_mb_write_multi` / `app_mb_write_coil` / `app_mb_write_coils`) used to return the opposite of what this section states — -3 on a successful write and 0 when the echo did not match. They now follow the documented convention: **0 = success, < 0 = error**. If your code worked around this by treating -3 as success, change it back. The read helpers were never affected. From the same release, concurrent calls on the backplane are properly isolated from each other (two tasks talking to two modules at the same moment could previously receive each other's reply).
 **Drive relays / read digital I/O (coils).** A relay module maps its outputs to coils `0..N-1`;
 `bits`/`out` are packed byte arrays, LSB = first coil:
 ```c
@@ -508,6 +509,26 @@ int      app_temp_read(void);       // chip temperature °C
 void     app_beep_set(uint8_t on);  // buzzer on/off
 // The platform feeds its own watchdog. Your tasks are separate threads — they may block freely.
 ```
+
+**Task check-in watchdog (added 2026-11-17)**: the hardware watchdog is fed by the platform main loop, so on its own it only proves that loop is alive — a control task of yours that hangs with an output ON would go unnoticed. A task that owns actuators should register once and check in on every pass of its loop; if it stays silent longer than `max_gap_ms` the platform journals `task stalled: <name>` and resets (outputs return to their safe state on reboot). Choose `max_gap_ms` well above the task's worst legitimate blocking time (file I/O, Modbus timeouts); 30 s suits a 0.5 to 5 s control loop. Up to 8 tasks can register.
+```c
+int  app_wdg_register(const char *name, uint32_t max_gap_ms);   // returns a handle (>= 0), -1 = table full
+void app_wdg_checkin(int handle);                               // call once per pass of your task loop
+
+static void my_task(void *arg)
+{
+  int wdg = app_wdg_register("mixer", 30000);
+  for (;;) { app_wdg_checkin(wdg); /* ... control work ... */ vTaskDelay(pdMS_TO_TICKS(500)); }
+}
+```
+The platform's own fertigation task (`dose`, 45 s) and roof-vent task (`vent`, 60 s) do exactly this. The CM4 side follows the same idea: the task that feeds its watchdog checks once a second that the seven bus threads and the RPC thread are still spinning, and stops feeding if any of them has been stuck for 20 s.
+
+**Bounded string append (added 2026-11-17)**: when building a heartbeat or JSON string, do not write `n += snprintf(buf + n, cap - n, ...)`. `snprintf` returns the length it *wanted* to write, so after one truncation `n` passes `cap`, `cap - n` wraps to a huge unsigned value and the next call writes out of bounds. Use `app_sncat`:
+```c
+uint16_t app_sncat(char *buf, uint16_t n, size_t cap, const char *fmt, ...);   // returns the new length, never past cap-1
+n = app_sncat(b, n, sizeof b, ",\"t\":%d", t);
+```
+Once the buffer is full it stays at `cap-1` (output cut, memory safe).
 
 **Network fallback address (netcfg, added 2026-08-31)**: DHCP always comes first; if no lease arrives within ~8 s of boot, the controller falls back to a static address. The factory default comes from compile-time `app_cfg.h` (`CFG_STATIC_IP` etc.) and can be changed per site over the console or a cloud command, persisted on littlefs (`net.cfg`) — one universal image fits every network:
 

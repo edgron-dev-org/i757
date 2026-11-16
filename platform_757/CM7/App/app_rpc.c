@@ -33,6 +33,9 @@ void app_rpc_boot_scrub(void)
   for (uint32_t i = 0; i < (sizeof(resource_table) / 4U); i++) { p[i] = 0U; }
 }
 static volatile uint16_t s_rx_len = 0;
+static uint8_t  s_seq = 0;                 /* transaction tag of the request in flight (protocol v1.10) */
+static uint32_t s_late = 0;                /* replies dropped because their tag was not the awaited one */
+__attribute__((section(".axisram"))) static uint8_t s_tx[496];   /* [tag][request]; AXI RAM: main RAM is nearly full */
 static volatile uint32_t s_last_rx = 0;   /* timestamp of last reply (the alive criterion) */
 static uint8_t s_rx[512];
 
@@ -45,10 +48,12 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
                        uint32_t src, void *priv)
 {
   (void)ept; (void)src; (void)priv;
+  s_last_rx = HAL_GetTick();   /* any message proves CM4 alive; the consumer polls on defaultTask */
+  if ((len < 2U) || (((const uint8_t *)data)[0] != s_seq)) { s_late++; return 0; }   /* a late reply to an earlier, timed-out transaction */
+  len--;                       /* strip the tag */
   if (len > sizeof(s_rx)) { len = sizeof(s_rx); }
-  memcpy(s_rx, data, len);
+  memcpy(s_rx, (const uint8_t *)data + 1, len);
   s_rx_len = (uint16_t)len;
-  s_last_rx = HAL_GetTick();   /* the consumer polls on defaultTask */
   return 0;
 }
 
@@ -91,9 +96,13 @@ static uint16_t rpc_transact_inner(const uint8_t *req, uint16_t len,
                                    uint8_t *rsp, uint16_t cap, uint32_t timeout_ms)
 {
   if (!is_rpmsg_ept_ready(&s_ept)) { return 0; }   /* CM4 not ready: refuse to send (sending on an empty endpoint = HardFault) */
-  OPENAMP_check_for_message();   /* flush the previous transaction's late leftover reply, to avoid being off by one tick */
+  if ((uint32_t)len > (sizeof(s_tx) - 1U)) { return 0; }
+  OPENAMP_check_for_message();   /* drain whatever is still queued from an earlier transaction */
   s_rx_len = 0;
-  if (OPENAMP_send(&s_ept, req, len) < 0) { return 0; }
+  s_seq++;                       /* from here on only a reply carrying this tag is accepted */
+  s_tx[0] = s_seq;
+  memcpy(&s_tx[1], req, len);
+  if (OPENAMP_send(&s_ept, s_tx, (int)len + 1) < 0) { return 0; }
   uint32_t t0 = HAL_GetTick();
   while ((HAL_GetTick() - t0) < timeout_ms)
   {
@@ -119,6 +128,20 @@ uint16_t app_rpc_transact(const uint8_t *req, uint16_t len,
   return r;
 }
 
+/* Lock-held variant for callers that keep shared scratch buffers around the transaction
+ * (app_mbport.c master_transact): take app_rpc_lock(), fill the buffer, call this, copy the
+ * reply out, app_rpc_unlock(). The mutex is not recursive: never call app_rpc_transact() while
+ * holding the lock. */
+void app_rpc_lock(void)   { if (s_rpc_mtx != NULL) { xSemaphoreTake(s_rpc_mtx, portMAX_DELAY); } }
+void app_rpc_unlock(void) { if (s_rpc_mtx != NULL) { xSemaphoreGive(s_rpc_mtx); } }
+uint16_t app_rpc_transact_locked(const uint8_t *req, uint16_t len,
+                                 uint8_t *rsp, uint16_t cap, uint32_t timeout_ms)
+{
+  return rpc_transact_inner(req, len, rsp, cap, timeout_ms);
+}
+
+uint32_t app_rpc_late(void) { return s_late; }   /* diagnostics: late replies dropped (see s_seq) */
+
 uint8_t app_rpc_alive(void)
 {
   return ((HAL_GetTick() - s_last_rx) < 15000U) ? 1U : 0U;
@@ -137,10 +160,10 @@ void app_rpc_hb(void)   /* tiny round-trip capped at 30ms, feeds the alive times
  * back to running on its own = still a proof that CM4 is alive. */
 void app_rpc_led_sync(uint8_t green_on)
 {
-  uint8_t msg[2] = { 0x06U, green_on };
+  uint8_t msg[3] = { 0x00U, 0x06U, green_on };   /* [tag][op][state]; no reply, so the tag value is irrelevant */
   if (!is_rpmsg_ept_ready(&s_ept)) { return; }
   if (s_rpc_mtx != NULL) { xSemaphoreTake(s_rpc_mtx, portMAX_DELAY); }
-  (void)OPENAMP_send(&s_ept, msg, 2);
+  (void)OPENAMP_send(&s_ept, msg, 3);
   if (s_rpc_mtx != NULL) { xSemaphoreGive(s_rpc_mtx); }
 }
 

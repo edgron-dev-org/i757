@@ -101,7 +101,8 @@ Stream allocation is fixed in the generated layer (`.ioc` / `it.c` / `usart.c`) 
 |---|---|---|
 | HSEM 0/1 | Dual-core | 0 = boot sync + RPMsg kick; 1 = RPMsg kick reverse direction |
 | IWDG1 | CM7 always on | 32 s, fed by defaultTask every 500 ms; **defaultTask blocking must be < 32 s** (longest = OTA bank erase ~8 s); DBGMCU freeze at breakpoints |
-| IWDG2 | CM4 always on | 32 s, fed by the 1 ms main loop; a bite = full-system reset → falls into the OTA trial-period safety net |
+| IWDG2 | CM4 always on | 32 s, fed by the 1 ms main loop; a bite = full-system reset → falls into the OTA trial-period safety net. The main loop checks once a second that the seven bus threads and the RPC thread are still spinning and stops feeding if any of them has been stuck for 20 s (2026-11-17) |
+| Task check-in (software) | CM7 | `app_wdg_register/checkin` (app_platform.h, 2026-11-17): tasks that own actuators register and check in every pass; the main loop verifies them before feeding IWDG1 and resets with the reason `task stalled: <name>` on a miss. Registered by the platform: `dose` 45 s, `vent` 60 s; table size 8 |
 | RTC | CM7 | LSE 32768, raw registers; time service survives reset |
 | RNG | CM7 | HSI48 clock source; mbedTLS entropy / ECDSA |
 | ADC3 | CM7 | Internal temperature (ch18); ADC1/2 free for the analog front end |

@@ -10,6 +10,7 @@
  * CM4 reports itself over RPMsg op 0x0D (docs/Inter_Core_RPMsg_Protocol.md).
  */
 #include <stdio.h>
+#include "app_platform.h"   /* app_sncat */
 #include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -115,13 +116,13 @@ void app_diag_boot_forensics(char *out, uint16_t cap)
     char nm[28];
     memcpy(nm, (const void *)r->reason, sizeof nm); nm[sizeof nm - 1U] = 0;
     r->magic = 0;
-    n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), " cause=%s", nm);
+    n = app_sncat(out, (uint16_t)n, cap, " cause=%s", nm);
   }
   if (bb[0] == 0xFA017CB7UL)
   {
     static const char *ft[5] = { "?", "hard", "mem", "bus", "usage" };
     uint32_t t = (bb[1] < 5U) ? bb[1] : 0U;
-    n += (uint16_t)snprintf(&out[n], (size_t)(cap - n),
+    n = app_sncat(out, (uint16_t)n, cap,
                             " FAULT=%s cfsr=%08lx hfsr=%08lx pc=%08lx psp=%08lx bfar=%08lx mmfar=%08lx",
                             ft[t], (unsigned long)bb[2], (unsigned long)bb[3], (unsigned long)bb[4],
                             (unsigned long)bb[5], (unsigned long)bb[6], (unsigned long)bb[7]);
@@ -173,7 +174,7 @@ const char *app_diag_boot_ring_str(void)     /* "n=<boots> | newest | ... | olde
   {
     const char *e = s_bootring[(s_bootring_n - 1U - k) % BOOTRING_N];
     if (e[0] == 0) { continue; }
-    n += (uint16_t)snprintf(&s_bootring_str[n], sizeof s_bootring_str - n, " | %s", e);
+    n = app_sncat(s_bootring_str, (uint16_t)n, sizeof s_bootring_str, " | %s", e);
     if (n >= sizeof s_bootring_str - 1U) { break; }
   }
   if (s_bootring_magic != BOOTRING_MAGIC) { snprintf(s_bootring_str, sizeof s_bootring_str, "n=? (uninit)"); }
@@ -311,7 +312,7 @@ void app_diag_fault_str(char *out, uint16_t cap)   /* "" = no fault recorded on 
     char nm[13];
     if ((m & 0xFFFFFF00UL) != HEALTH_MAGIC) { continue; }
     memcpy(nm, (const void *)rec[i]->name, 12); nm[12] = 0;
-    n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), "%s%s-%s:%s", (n > 0U) ? "+" : "",
+    n = app_sncat(out, (uint16_t)n, cap, "%s%s-%s:%s", (n > 0U) ? "+" : "",
                             core[i], ((m & 0xFFU) == HEALTH_STACK) ? "STACK" : "HEAP", nm);
     if (n >= cap) { break; }
   }
@@ -351,7 +352,7 @@ void app_diag_hb(char *out7, uint16_t cap7, char *out4, uint16_t cap4,
     uint32_t freeb = (uint32_t)st[k].usStackHighWaterMark * 4U;
     if (strcmp(st[k].pcTaskName, "IDLE") == 0) { idle7 = cpu; }
     if (freeb < stkmin) { stkmin = freeb; }
-    if (n < cap7) { n += (uint16_t)snprintf(&out7[n], (size_t)(cap7 - n), "%s%s:%c%u%%/%luB",
+    if (n < cap7) { n = app_sncat(out7, (uint16_t)n, cap7, "%s%s:%c%u%%/%luB",
                      (n > 0U) ? " " : "", st[k].pcTaskName,
                      state_letter((uint8_t)st[k].eCurrentState), (unsigned)cpu,
                      (unsigned long)freeb); }
@@ -384,7 +385,7 @@ void app_diag_hb(char *out7, uint16_t cap7, char *out4, uint16_t cap4,
       freeb = (uint32_t)(e[DIAG_NAME_LEN + 2U] | ((uint16_t)e[DIAG_NAME_LEN + 3U] << 8)) * 4U;
       if (strcmp(name, "IDLE") == 0) { idle4 = e[DIAG_NAME_LEN + 4U]; }
       if (freeb < stkmin) { stkmin = freeb; }
-      if (n < cap4) { n += (uint16_t)snprintf(&out4[n], (size_t)(cap4 - n), "%s%s:%c%u%%/%luB",
+      if (n < cap4) { n = app_sncat(out4, (uint16_t)n, cap4, "%s%s:%c%u%%/%luB",
                        (n > 0U) ? " " : "", name, state_letter(e[DIAG_NAME_LEN]),
                        (unsigned)e[DIAG_NAME_LEN + 4U], (unsigned long)freeb); }
     }
@@ -517,10 +518,10 @@ static void mtsk_one(const mod_ident_t *m, char *out, uint16_t cap, uint16_t *n)
   uint16_t rl = app_mb_transact(m->addr, q, (uint16_t)ql, r, sizeof(r), 1);
   if ((rl == 0U) || (mb_rsp_regs(r, rl, MB_FC_READ_INPUT, hdr, 3) != 3) || (hdr[0] == 0U) || (hdr[0] > 8U))
   {
-    *n += (uint16_t)snprintf(&out[*n], (size_t)(cap - *n), ",\"m%utsk\":\"-\"", (unsigned)m->addr);
+    *n = app_sncat(out, (uint16_t)(*n), cap, ",\"m%utsk\":\"-\"", (unsigned)m->addr);
     return;
   }
-  *n += (uint16_t)snprintf(&out[*n], (size_t)(cap - *n), ",\"m%ucpu\":%u,\"m%ustk\":%u,\"m%utsk\":\"",
+  *n = app_sncat(out, (uint16_t)(*n), cap, ",\"m%ucpu\":%u,\"m%ustk\":%u,\"m%utsk\":\"",
                            (unsigned)m->addr, (unsigned)hdr[1], (unsigned)m->addr, (unsigned)hdr[2],
                            (unsigned)m->addr);
   {
@@ -535,13 +536,13 @@ static void mtsk_one(const mod_ident_t *m, char *out, uint16_t cap, uint16_t *n)
         char nm[9];
         for (int c = 0; c < 4; c++) { nm[c * 2] = (char)(e[c] >> 8); nm[c * 2 + 1] = (char)(e[c] & 0xFFU); }
         nm[8] = 0;
-        if (*n < cap) { *n += (uint16_t)snprintf(&out[*n], (size_t)(cap - *n), "%s%s:%c%u%%/%uB",
+        if (*n < cap) { *n = app_sncat(out, (uint16_t)(*n), cap, "%s%s:%c%u%%/%uB",
                           (k > 0U) ? " " : "", nm, state_letter((uint8_t)(e[4] >> 8)),
                           (unsigned)e[5], (unsigned)e[6]); }
       }
     }
   }
-  if (*n < cap) { *n += (uint16_t)snprintf(&out[*n], (size_t)(cap - *n), "\""); }
+  if (*n < cap) { *n = app_sncat(out, (uint16_t)(*n), cap, "\""); }
 }
 
 /* ---- PH_EC engineering values -> heartbeat fields (module spec §2, regs 0x0108~) ----
@@ -581,7 +582,7 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
       uint16_t rl = app_mb_transact(m->addr, qd, (uint16_t)ql, rd, sizeof(rd), 1);
       if ((rl > 0U) && (mb_rsp_bits(rd, rl, MB_FC_READ_DISC, bits, 2U) == 2))
       {
-        n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%udi\":%u",
+        n = app_sncat(out, (uint16_t)n, cap, ",\"m%udi\":%u",
                                 (unsigned)m->addr, (unsigned)(bits[0] | ((uint16_t)bits[1] << 8)));
       }
       ql = mb_req_read(qd, MB_FC_READ_INPUT, DI16_CNT_BASE, 32U);
@@ -591,7 +592,7 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
         for (uint8_t k = 0; (k < 16U) && (n < cap); k++)
         {
           uint32_t cnt = ((uint32_t)c[2U * k] << 16) | c[2U * k + 1U];
-          n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%uc%u\":%lu",
+          n = app_sncat(out, (uint16_t)n, cap, ",\"m%uc%u\":%lu",
                                   (unsigned)m->addr, (unsigned)(k + 1U), (unsigned long)cnt);
         }
       }
@@ -608,12 +609,12 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
       {
         for (uint8_t k = 0; (k < 8U) && (n < cap); k++)
         {
-          n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%ua%u\":%u",
+          n = app_sncat(out, (uint16_t)n, cap, ",\"m%ua%u\":%u",
                                   (unsigned)m->addr, (unsigned)(k + 1U), (unsigned)v9[k]);
         }
         if (n < cap)
         {
-          n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%uast\":%u",
+          n = app_sncat(out, (uint16_t)n, cap, ",\"m%uast\":%u",
                                   (unsigned)m->addr, (unsigned)(v9[8] & 0xFFU));
         }
       }
@@ -630,7 +631,7 @@ void app_diag_mdata(char *out, uint16_t cap)  /* heartbeat: raw JSON fragment (m
     {
       if (v[k] == PHEC_ENG_INVAL) { continue; }
       /* ph/temp are signed x100 / x10 fixed-point, EC is unsigned uS/cm; desc carries the scale */
-      n += (uint16_t)snprintf(&out[n], (size_t)(cap - n), ",\"m%u%s\":%d",
+      n = app_sncat(out, (uint16_t)n, cap, ",\"m%u%s\":%d",
                               (unsigned)m->addr, fld[k],
                               (k == 2U || k == 3U) ? (int)v[k] : (int)(int16_t)v[k]);
     }

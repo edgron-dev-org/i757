@@ -167,6 +167,12 @@ typedef struct {
   uint16_t ec_avg, ph_avg;
   uint8_t  ph_src_bad, ec_src_bad;   /* latched: probes disagree */
   uint8_t  strikes[3], unlearned[3];
+  int32_t  nr_exp[3];                /* expected movement (x1000) of the consecutive no-response shots per slot */
+  uint8_t  ph_alone;                 /* consecutive cycles the A/B pair was deferred so a pH shot could be judged alone */
+  struct ferti_gate { uint16_t tr, cand, n; uint8_t oor, ok_n; } g_ec, g_ph;   /* plausibility + jump gate per channel */
+  uint16_t ec_raw, ph_raw; uint8_t wq_bad_n;   /* ungated readings and how many 5 s samples in a row they were unsafe to irrigate with */
+  char     use_file[20];             /* 24 h usage record on littlefs */
+  uint8_t  use_loaded, use_dirty; uint16_t use_wait_s;
   uint32_t tu_last_dl; uint8_t tu_primed, tu_in;
   int32_t  tu_owed; uint32_t tu_ep_dl, tu_ep_ml, tu_quiet_s;
   uint16_t tu_pred_dl; int32_t tu_ep_dil; uint16_t tu_ec0; int32_t tu_carry;
@@ -190,7 +196,10 @@ typedef struct {
   uint8_t  di_prev;                  /* FERTI_DI_* bits, previous tick (edge detection) */
   uint32_t fill_dl0;                 /* inlet meter reading when the refill started (overrun guard, measured batch) */
   uint32_t m_last_dl, m_leak_dl, m_leak_ms;   /* inlet meter movement while the valve is commanded off (leak / valve stuck guard) */
-  uint8_t  tal_pend[8];              /* hydraulics alarms pending: 1 active, 2 clear */
+  uint32_t m_base, m_raw;            /* pulse meter made monotonic: a counter that restarts (HSDI reconfigured) adds no volume */
+  uint32_t noclk_ms; uint8_t noclk_alarmed;   /* scheduled irrigation waiting for a clock */
+  uint8_t  irr_wq_held;              /* irrigation held: reservoir pH/EC far outside the safe range */
+  uint8_t  tal_pend[9];              /* hydraulics alarms pending: 1 active, 2 clear */
   char     fault_why[16];
 
   char     hb[80];

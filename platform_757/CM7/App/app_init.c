@@ -149,6 +149,53 @@ void app_iwdg_init(void)
 }
 void app_iwdg_feed(void) { IWDG1->KR = 0xAAAAU; }
 
+/* ---- task check-in watchdog (API in app_platform.h) ----
+ * Polled by the mqtt main loop next to the IWDG feed. Plain word writes/reads of a tick count:
+ * no lock needed (a torn read is impossible on a 32-bit core, and a stale one only delays the
+ * verdict by one 500 ms pass). */
+#include <stdio.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#define WDG_NTASK 8U
+static struct { const char *name; uint32_t gap; volatile uint32_t last; } s_wdg[WDG_NTASK];
+static volatile uint8_t s_wdg_n = 0;
+
+int app_wdg_register(const char *name, uint32_t max_gap_ms)
+{
+  int id = -1;
+  taskENTER_CRITICAL();
+  if (s_wdg_n < WDG_NTASK)
+  {
+    id = (int)s_wdg_n;
+    s_wdg[id].name = name;
+    s_wdg[id].gap  = pdMS_TO_TICKS((max_gap_ms < 2000U) ? 2000U : max_gap_ms);
+    s_wdg[id].last = xTaskGetTickCount();
+    s_wdg_n++;
+  }
+  taskEXIT_CRITICAL();
+  return id;
+}
+
+void app_wdg_checkin(int handle)
+{
+  if ((handle >= 0) && (handle < (int)s_wdg_n)) { s_wdg[handle].last = xTaskGetTickCount(); }
+}
+
+void app_wdg_poll(void)   /* main loop, every pass */
+{
+  uint32_t now = xTaskGetTickCount();
+  for (uint8_t i = 0; i < s_wdg_n; i++)
+  {
+    if ((uint32_t)(now - s_wdg[i].last) > s_wdg[i].gap)
+    {
+      extern void app_reset(const char *reason);
+      static char why[40];
+      (void)snprintf(why, sizeof why, "task stalled: %s", (s_wdg[i].name != NULL) ? s_wdg[i].name : "?");
+      app_reset(why);
+    }
+  }
+}
+
 /* FreeRTOS heap moved to AXI: with configAPPLICATION_ALLOCATED_HEAP=1 the application defines it;
  * heap content = task stacks/TCBs/queues, pure CPU access, no AXI+D-Cache coherency issue; heap_4 self-initializes on first alloc */
 #include "FreeRTOS.h"
