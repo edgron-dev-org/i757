@@ -319,6 +319,8 @@ void app_diag_fault_str(char *out, uint16_t cap)   /* "" = no fault recorded on 
 
 /* CM4 table over RPC is throttled: refresh the cache every 5th heartbeat build */
 static uint8_t  s_hb_cm4[400];
+static uint32_t s_cm4_rt_dips;                   /* op0D v1.9 tail: CM4 run-time clock dips since boot */
+uint32_t app_diag_cm4_rt_dips(void) { return s_cm4_rt_dips; }
 static uint16_t s_hb_cm4_len = 0;
 static uint8_t  s_hb_ctr = 0;
 
@@ -387,6 +389,9 @@ void app_diag_hb(char *out7, uint16_t cap7, char *out4, uint16_t cap4,
                        (unsigned)e[DIAG_NAME_LEN + 4U], (unsigned long)freeb); }
     }
     *cpu4 = (uint8_t)(100U - idle4);
+    { uint16_t t = (uint16_t)(13U + (uint16_t)m * DIAG_ENTRY);    /* v1.9 tail (older CM4: absent) */
+      if ((uint16_t)(t + 4U) <= s_hb_cm4_len)
+      { s_cm4_rt_dips = (uint32_t)s_hb_cm4[t] | ((uint32_t)s_hb_cm4[t + 1U] << 8) | ((uint32_t)s_hb_cm4[t + 2U] << 16) | ((uint32_t)s_hb_cm4[t + 3U] << 24); } }
   }
   else { snprintf(out4, cap4, "?"); }
   *stkmin_b = (stkmin == 0xFFFFFFFFUL) ? 0U : stkmin;

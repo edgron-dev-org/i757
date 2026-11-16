@@ -30,12 +30,19 @@ extern uint16_t mbport_cm4_transact(uint8_t addr, const uint8_t *pdu, uint16_t p
                                     uint8_t *rsp_pdu, uint8_t expect_rsp);
 /* front-panel master transaction (app_mbfront_cm4.c) */
 extern uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
-                                 uint16_t timeout_ms, const uint8_t *pdu, uint16_t pn,
+                                 uint16_t timeout_ms, uint16_t gap_ms, const uint8_t *pdu, uint16_t pn,
                                  uint8_t *rsp_pdu, uint8_t *status);
 
-#define PSCAN_FRONT_TO_MS   20U   /* front-port scan timeout. A short RTU reply is well under
-                                   * this even at 9600 baud, and it bounds how long one dead
-                                   * device can hold ITS OWN bus thread per attempt. */
+#define PSCAN_FRONT_TO_MS   60U   /* front-port scan timeout DEFAULT (entry.timeout_ms = 0), counted
+                                   * from the end of our request to the complete reply; a row may
+                                   * override it (contract §3, timeout_ms / gap_ms, 2026-11-09).
+                                   * 20 ms was fine for our own modules but not
+                                   * for third-party sensors: a generic RS485 T/RH transmitter starts
+                                   * answering ~12 ms after the request and a soil probe ~18 ms, so
+                                   * their 9-byte replies complete 21..28 ms after TX end at 9600
+                                   * baud (bench, 2026-11-09, five sensors). 60 ms also covers a
+                                   * 7-register read from the slow one, and still bounds how long one
+                                   * dead device can hold ITS OWN bus thread per attempt. */
 #define PSCAN_OFFLINE_FAILS  3U   /* consecutive failures after which an entry is treated as offline */
 #define PSCAN_OFFLINE_MS  2000U   /* slow probe interval for an offline entry (rejoins on success) */
 #define PSCAN_RETRY_BP       2U   /* default extra attempts, backplane (bus profile, contract §6) */
@@ -184,7 +191,8 @@ static uint16_t bus_transact(const pimg_entry_t *e, const uint8_t *pdu, uint16_t
   }
   {
     uint8_t st = 0;
-    return mbfront_transact(e->port, e->addr, 1U, PSCAN_FRONT_TO_MS, pdu, pn, rsp, &st);
+    uint16_t to = e->timeout_ms ? e->timeout_ms : PSCAN_FRONT_TO_MS;   /* per-row override, 0 = default */
+    return mbfront_transact(e->port, e->addr, 1U, to, e->gap_ms, pdu, pn, rsp, &st);
   }
 }
 

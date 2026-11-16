@@ -321,11 +321,12 @@ static const char DESC_MID[] =
 "{\"id\":\"io.galm\",\"name\":\"Gutter Alarm\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"ga\"},"
 "{\"id\":\"io.flowr\",\"name\":\"Water Flow Rate\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"L/min\",\"scale\":0.1,\"group\":\"io\",\"f\":\"flowr\"},"
 "{\"id\":\"rly.do\",\"name\":\"Relay Outputs\",\"kind\":\"bits\",\"width\":16,\"rw\":\"rw\",\"group\":\"rly\",\"f\":\"rly\"},"
-"{\"id\":\"vent.stage\",\"name\":\"Roof Vent Stage\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"vent\"},"
+"{\"id\":\"vent.stage\",\"name\":\"Vent Stage (0-3 window, 4 fan)\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"vent\"},"
 "{\"id\":\"vent.mode\",\"name\":\"Roof Vent Mode\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"ventm\"},"
+"{\"id\":\"vent.night\",\"name\":\"Night Cooling\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"ventn\"},"
 "{\"id\":\"aer.state\",\"name\":\"Air Pump\",\"kind\":\"bool\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"aer\"},"
 "{\"id\":\"aer.mode\",\"name\":\"Air Pump Mode\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"aerm\"},"
-"{\"id\":\"dose.state\",\"name\":\"Dosing Pumps\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"dose\"},"
+"{\"id\":\"dose.state\",\"name\":\"Dosing Pumps\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"io\",\"f\":\"dose\"},%s%s"
 "{\"id\":\"do.beep\",\"name\":\"Buzzer\",\"kind\":\"bool\",\"rw\":\"rw\",\"group\":\"io\",\"f\":\"beep\"},"
 "{\"id\":\"sys.ver\",\"name\":\"Firmware Version\",\"kind\":\"str\",\"rw\":\"ro\",\"group\":\"sys\",\"f\":\"ver\"},"
 "{\"id\":\"sys.bank\",\"name\":\"Active Bank\",\"kind\":\"num\",\"rw\":\"ro\",\"group\":\"sys\",\"f\":\"bank\"},"
@@ -393,6 +394,8 @@ static void desc_build(void)
              ",{\"id\":\"m%up\",\"name\":\"Slot %u: Analog Inputs\"}", a, a);
     }
   }
+  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, "%s",
+                       ({ extern const char *app_user_desc_groups(void); app_user_desc_groups(); }));   /* 485E field sensor cards (app_user.c): process cards before System (2026-11-09) */
   n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_G_SYS);
   for (uint16_t i = 0; i < nm; i++)         /* health cards, address order, after System */
   {
@@ -402,7 +405,14 @@ static void desc_build(void)
            a, a, app_diag_mod_typename(app_diag_mod_type(mods, i)), fw >> 8, fw & 0xFFU);
   }
   n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_G_NET);
-  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_MID);
+  /* DESC_MID carries ONE %s inside the points array (after dose.state): the dosing cards of the
+   * other fertigation systems. It must be fed here — DESC_MID is a const char array, so the
+   * compiler cannot check the argument list; the first two-system board (i757-608a, 2026-10-27)
+   * shipped a desc with that %s reading a stray stack pointer into this very buffer: the JSON
+   * self-copied, the dash kept the stale desc and the new PH_EC card never appeared. */
+  n += (u16_t)snprintf(&s_desc_buf[n], sizeof(s_desc_buf) - n, DESC_MID,
+                       ({ extern const char *ferti_desc_more(void); ferti_desc_more(); }),
+                       ({ extern const char *app_user_desc_points(void); app_user_desc_points(); }));   /* 485E field sensors */
   for (uint16_t i = 0; i < nm; i++)
   {
     unsigned a = app_diag_mod_addr(mods, i);
@@ -1030,7 +1040,7 @@ void mqtt_app_task(void)
           if (app_diag_mods_dirty()) { desc_build(); s_desc_pub_err = 1; tcpip_callback(mqtt_desc_republish_cb, NULL); } }
       { extern uint32_t app_se_hs608_count(void); extern uint32_t app_se_hs608_fail(void);
         snprintf(s_pub_buf, sizeof(s_pub_buf),
-               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"eth\":\"%s\",\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"aer\":%u,\"aerm\":\"%s\",\"dose\":\"%s\",\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
+               "{\"ver\":\"%s\",\"bkr\":\"%s\",\"sec\":\"%s\",\"hs608\":%lu,\"hs608f\":%lu,\"dsc\":%d,\"mqfix\":%u,\"mqk\":%u,\"mqkc\":%u,\"bank\":%lu,\"ota\":\"%s\",\"evt\":\"%s\",\"fws\":\"%s\",\"fwk2\":\"%s\",\"time\":%lu,\"recv\":%lu,\"tick\":%lu,\"rxirq\":%lu,\"eth\":\"%s\",\"heap\":%u,\"pub_ok\":%lu,\"beep\":%d,\"temp\":%d,\"hsdi\":%u,\"c0\":%lu,\"c1\":%lu,\"c2\":%lu,\"c3\":%lu,\"c4\":%lu,\"g1\":%u,\"g2\":%u,\"g3\":%u,\"g4\":%u,\"ga\":%u,\"flow\":%lu,\"flowr\":%u,\"rly\":%u,\"vent\":%u,\"ventm\":\"%s\",\"ventn\":\"%s\",\"aer\":%u,\"aerm\":\"%s\",\"dose\":\"%s\"%s%s,\"mb\":\"%s\",\"p5\":\"%s\",\"cpu\":%u,\"cpu4\":%u,\"rtdip\":%lu,\"stkmin\":%lu,\"tsk7\":\"%s\",\"tsk4\":\"%s\",\"rst\":\"%s\",\"flt\":\"%s\",\"cmdr\":\"%s\",\"dlog\":\"%s\",\"wda\":\"%s\",\"mqa\":\"%s\",\"bf\":\"%s\"%s%s}",
                FW_VERSION, (s_broker == BRK_AWS) ? "aws" : (s_broker == BRK_LAN) ? "lan" : "pub",
                (s_clone == APP_AC_GENUINE) ? "ok" : (s_clone == APP_AC_ABSENT) ? "nose" : "clone",
                (unsigned long)app_se_hs608_count(), (unsigned long)app_se_hs608_fail(), (int)s_desc_pub_err,
@@ -1056,11 +1066,16 @@ void mqtt_app_task(void)
                (unsigned)app_demo_relays(),
                (unsigned)({ extern uint8_t app_vent_stage(void); app_vent_stage(); }),
                ({ extern const char *app_vent_mode(void); app_vent_mode(); }),
+               ({ extern const char *app_vent_night(void); app_vent_night(); }),
                (unsigned)({ extern uint8_t app_aer_state(void); app_aer_state(); }),
                ({ extern const char *app_aer_mode(void); app_aer_mode(); }),
                ({ extern const char *app_dose_hb(void); app_dose_hb(); }),
+               ({ extern const char *ferti_hb_more(void); ferti_hb_more(); }),
+               ({ extern const char *app_user_hb_more(void); app_user_hb_more(); }),   /* 485E field sensors (app_user.c) */
                mb_str, app_p5_str(),
-               (unsigned)cpu7, (unsigned)cpu4, (unsigned long)stkmin,
+               (unsigned)cpu7, (unsigned)cpu4,
+               (unsigned long)({ extern uint32_t app_diag_cm4_rt_dips(void); app_diag_cm4_rt_dips(); }),   /* CM4 run-time clock dips (cpu4 accounting health) */
+               (unsigned long)stkmin,
                tsk7_str, tsk4_str, app_diag_reset_cause(), flt_str, s_mbreg_result,
                ({ extern const char *app_datalog_hb(void); app_datalog_hb(); }), s_wda, s_autopsy,
                ({ extern const char *app_diag_boot_ring_str(void); app_diag_boot_ring_str(); }),

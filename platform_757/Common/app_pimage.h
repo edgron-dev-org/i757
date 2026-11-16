@@ -91,9 +91,11 @@ typedef struct {
   uint16_t count;     /* qty (bits for coil/discrete, words for registers) */
   uint16_t img_off;   /* byte offset into in[] (input access) or out[] (output access) */
   uint16_t period;    /* desired poll interval in base ticks; 0 = disabled */
-  uint16_t seq_idx;   /* index into st.seq[] guarding this entry's image slice */
+  uint8_t  seq_idx;   /* index into st.seq[] guarding this entry's image slice (< PIMG_MAX_ENTRIES) */
+  uint8_t  gap_ms;    /* front ports: bus silence required before this entry's request, ms; 0 = none
+                       * (cheap third-party slaves ignore a request within ~10 ms of the previous frame) */
   uint8_t  retry;     /* per-entry retry count; 0 = bus default */
-  uint8_t  _pad;
+  uint8_t  timeout_ms;/* front ports: reply timeout, ms; 0 = platform default (PSCAN_FRONT_TO_MS) */
 } pimg_entry_t;
 
 /* ---- control block (CM7 writes, CM4 reads) ---- */

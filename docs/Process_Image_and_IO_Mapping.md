@@ -92,9 +92,11 @@ One entry = one unidirectional Modbus transaction, repeated at its own period.
 | `count` | u16 | quantity (bits for coil/discrete, words for registers) |
 | `img_off` | u16 | byte offset into the input or output image (assigned by `app_io_setup`) |
 | `period` | u16 | desired poll interval in base ticks; 0 = disabled |
-| `seq_idx` | u16 | which seqlock counter guards this entry's slice |
+| `seq_idx` | u8 | which seqlock counter guards this entry's slice |
 | `flags` | u8 | bit0 = byte-swapped word device; bit1 = **hold last values while offline**. Default (bit1=0): the entry's input slice is **zeroed at the moment the entry crosses 3 consecutive failures** — stale sensor data must not look alive, and `ok[]` drops to 0 at the same instant [2026-07-19] |
 | `retry` | u8 | extra attempts on **silence or mangled frames only** (a Modbus exception IS an answer — the device is online, no retry); 0 = bus default (backplane 2, front ports 1) [2026-07-19] |
+| `timeout_ms` | u8 | **front ports**: reply timeout for this entry (ms), from the end of the request to the complete frame; 0 = platform default 60 ms (`PSCAN_FRONT_TO_MS`). Ignored on the backplane (fixed profile) [2026-11-09, was `_pad`] |
+| `gap_ms` | u8 | **front ports**: bus silence this entry needs before its request (ms), from the end of the previous frame on that port; 0 = none. Cheap third-party slaves ignore a request within ~10 ms of the previous frame; 20 is typical. Ignored on the backplane [2026-11-09; freed by shrinking `seq_idx` to u8] |
 
 | `access` | Direction | Function code | Granularity |
 |---|---|---|---|
@@ -157,8 +159,7 @@ no scan-table owner is cleaned by nobody). Two rules, implemented once for both 
   (`Backplane_Bus_Protocol.md` section 2 for the backplane: 5 ms response timeout, 2 retries,
   3 consecutive silences = offline — the entry then drops to a **2 s** probe until it answers
   again, and recovery is automatic [2026-07-19: fixed per the implementation, previously stated
-  as ~1 s]). The front-port scan timeout is fixed at **20 ms** (ample even for short frames at
-  9600 baud).
+  as ~1 s]). The front-port scan timeout is the entry's `timeout_ms`, 0 = default **60 ms** [2026-11-09: widened from a fixed 20 ms because third-party sensors complete their reply only 21..28 ms after the request at 9600 baud]; the bus silence before a request is the entry's `gap_ms` (cheap slaves need ~10 ms, 20 is typical); the timing profile and the measurements behind it are in Universal_Modbus_Port_Config.md §3.2 v0.2.
 - **Bus arbitration**: aperiodic transactions (diagnostics, OTA, configuration) share the wire
   with the scanner; CM4 injects them between scan transactions. Cyclic I/O belongs to the image,
   everything else to the on-demand path.
@@ -279,3 +280,5 @@ channel 0 every 20 ms and an external master writing channel 1 coexist without i
 - **Aperiodic access** (setup, diagnostics, OTA) → the blocking `app_mb_read/write_*` helpers.
 - The scan table is a **compile-time table in a user file** (`app_user.c`); edit the rows for your
   devices. Runtime reconfiguration (persisted, CLI/cloud editable) is a later step.
+
+> 2026-11-09: §3 entries gain `timeout_ms`/`gap_ms` (per-entry front-port timing; `seq_idx` shrunk to u8, entry still 16 B); §6 default front-port scan timeout 20→60 ms, inter-transaction silence now per entry (third-party sensor bench; details in Universal_Modbus_Port_Config.md §3.2 v0.2).

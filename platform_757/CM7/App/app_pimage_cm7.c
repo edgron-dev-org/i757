@@ -87,7 +87,8 @@ int app_io_setup(const app_io_point_t *pts, uint16_t n, uint16_t base_tick_ms)
     e.port = p->port; e.addr = p->addr; e.access = p->access; e.flags = p->flags;
     e.start = p->start; e.count = p->count;
     e.period = p->period;                             /* 0 = entry disabled (contract §3) */
-    e.seq_idx = i;
+    e.seq_idx = (uint8_t)i;
+    e.timeout_ms = p->timeout_ms; e.gap_ms = p->gap_ms;   /* front-port timing overrides (contract §3) */
     /* Every point starts on a 2-byte boundary so it lands on a clean Modbus register
      * boundary in the external window (register n = image bytes [2n, 2n+1]). */
     uint16_t step = (uint16_t)((nb + 1U) & ~1U);
@@ -351,9 +352,10 @@ int app_pio_cli(char *line)   /* returns 1 if it handled the line */
       int isbit = (e->access == APP_IO_IN_COILS) || (e->access == APP_IO_IN_DISCRETE) ||
                   (e->access == APP_IO_OUT_COILS);
       int isin  = (e->access <= APP_IO_IN_HOLDING);
-      printf(" [%u] p%u a%u %s st%u n%u per%u ok%u fail%u exc%u | ext %s 0x%04X..0x%04X | ",
+      printf(" [%u] p%u a%u %s st%u n%u per%u to%u gap%u ok%u fail%u exc%u | ext %s 0x%04X..0x%04X | ",
              (unsigned)i, (unsigned)e->port, (unsigned)e->addr, acc_str(e->access),
              (unsigned)e->start, (unsigned)e->count, (unsigned)e->period,
+             (unsigned)e->timeout_ms, (unsigned)e->gap_ms,
              (unsigned)PIMG->st.ok[i], (unsigned)PIMG->st.fails[i], (unsigned)PIMG->st.last_exc[i],
              isbit ? (isin ? "FC02" : "FC01/05/15") : (isin ? "FC04" : "FC03/06/16"),
              isbit ? wbit : wreg,

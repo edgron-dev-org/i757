@@ -358,7 +358,12 @@ static const app_io_point_t s_io_table[] = {
   /* port,          addr, access,             flags, start, count, period(x base tick)
    * Pick periods the wire can carry: one FC02/FC04 transaction at 9600 baud costs ~20 ms
    * round-trip, so period 20 (= 20 ms here) is a floor, not a suggestion — a shorter
-   * period cannot poll faster than the bus, it only saturates it and counts overruns. */
+   * period cannot poll faster than the bus, it only saturates it and counts overruns.
+   * Two optional trailing columns, timeout_ms and gap_ms (front ports only), tune the
+   * master for slow third-party slaves: e.g. "..., 2000, 60, 20" waits 60 ms for the
+   * reply and keeps 20 ms of bus silence before the request (cheap sensors ignore a
+   * request that follows the previous frame too closely). Budget ~50 ms per such
+   * transaction at 9600. Rows with 7 initializers use the defaults (60 ms, no gap). */
   { APP_PORT_485A,  1,    APP_IO_IN_DISCRETE, 0,     0,     12,    20  },  /* 12 DI  <- FC02 */
   { APP_PORT_485A,  2,    APP_IO_IN_INPUT_REG,0,     0,     8,     100 },  /*  8 AI  <- FC04 */
   { APP_PORT_485A,  1,    APP_IO_OUT_COILS,   0,     0,     8,     20  },  /*  8 DO  -> FC15 */

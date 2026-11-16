@@ -36,7 +36,9 @@ static uint32_t prev_of(UBaseType_t id)
 }
 
 /* reply: [n][heap_free u32][heap_min u32][tick u32]
- *        then n x {name[12], state, prio, hw u16, cpu%} */
+ *        then n x {name[12], state, prio, hw u16, cpu%}
+ *        then [rt_dips u32] (contract v1.9, 2026-11-09: run-time clock dips clamped since boot) */
+extern uint32_t app_rt_stats_dips(void);
 uint16_t diag_cm4_tasks(uint8_t *out)
 {
   static TaskStatus_t st[DIAG_MAX_TASK];
@@ -85,6 +87,8 @@ uint16_t diag_cm4_tasks(uint8_t *out)
   }
   s_prev_n = (uint8_t)n;
   s_prev_total = total;
+  put32(&out[off], app_rt_stats_dips());        /* v1.9 tail: run-time clock dip count */
+  off = (uint16_t)(off + 4U);
   return off;
 }
 
@@ -114,17 +118,34 @@ void app_rt_stats_init(void)
  * that horizon; op0D's delta-based cpu% stays correct forever. Contract: Inter_Core op0E note. */
 static uint32_t s_us_last;
 static uint64_t s_us_acc;
+static uint32_t s_rt_dips;   /* clamped dips since boot: each one mis-credits ~1 ms to whichever task runs next */
+uint32_t app_rt_stats_dips(void) { return s_rt_dips; }
 
 static uint32_t rt_raw_us(void)
 {
-  uint32_t t1, t2, c;
+  /* tick*1000 + CNT is only monotonic if the snapshot is consistent. The stable-tick loop alone
+   * is not enough: between TIM7's rollover (CNT back to ~0, UIF set) and its ISR bumping uwTick
+   * the sum reads ~1 ms LOW. The caller clamped that dip and let the next sample re-cover it,
+   * which credits the missing ~1 ms to whichever task runs right after the tick — rpcCM4, the
+   * 1 ms poller with the highest priority. Whether the dip happens at all depends on the fixed
+   * boot-time phase between SysTick (RTOS tick, exception 15) and TIM7 (IRQ, same priority):
+   * when TIM7 rolls over just before SysTick, PendSV (exception 14) is dispatched BEFORE the
+   * TIM7 ISR and every context switch samples the dip. i757-608a, 2026-11-09: one boot showed
+   * rpcCM4 at 25..31 % and cpu4 41..46 % with the dip counter climbing, the next boot rpcCM4 0 %
+   * and one dip in 15 s — same firmware, same load. Fix: read the update flag on both sides of
+   * CNT and retry until tick and flag are both stable, then count the pending rollover in.
+   * The HAL ISR clears UIF BEFORE incrementing uwTick and nothing that samples this clock can
+   * preempt that ISR, so "UIF set" always means "rollover not yet booked" — add 1 ms. */
+  uint32_t t1, t2, c, u1, u2;
   do
   {
     t1 = HAL_GetTick();
+    u1 = (__HAL_TIM_GET_FLAG(&htim7, TIM_FLAG_UPDATE) != RESET) ? 1U : 0U;
     c  = (uint32_t)__HAL_TIM_GET_COUNTER(&htim7);
+    u2 = (__HAL_TIM_GET_FLAG(&htim7, TIM_FLAG_UPDATE) != RESET) ? 1U : 0U;
     t2 = HAL_GetTick();
-  } while (t1 != t2);
-  return (t1 * 1000U) + c;
+  } while ((t1 != t2) || (u1 != u2));
+  return ((t1 + u1) * 1000U) + c;
 }
 uint32_t app_rt_stats_get(void)
 {
@@ -135,7 +156,8 @@ uint32_t app_rt_stats_get(void)
    * The stable-tick loop cannot see that. An unsigned dip becomes a ~2^32 us delta and credits
    * ~67M units to whatever task is running (bench-caught: rpcCM4 at 935M units = 92% while the
    * delta view said 0%). Clamp: skip the dip, the next call re-covers it (~1 ms error/event). */
-  if (d < 0x80000000UL) { s_us_acc += d; }
+  if (d < 0x80000000UL) { s_us_acc += d; } else { s_rt_dips++; }   /* safety net only since the rt_raw_us fix:
+                                                                      * rtdip must stay 0 (op0D tail / heartbeat) */
   s_us_last = now;
   return (uint32_t)(s_us_acc >> 6);
 }

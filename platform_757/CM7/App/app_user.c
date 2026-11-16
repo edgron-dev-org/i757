@@ -35,11 +35,17 @@
  * ========================================================================================== */
 
 /* ---- 1a. Field devices polled over Modbus (the process-image scan table) ----
- * Three devices on the 485A port. The CM4 scanner polls them in the background and keeps their
- * data in the process image; your code and any external master then just read/write memory.
- *   addr 1 : 12 digital inputs + 8 digital outputs
- *   addr 2 : 8 x 16-bit analog inputs
- *   addr 3 : 8 x 16-bit analog outputs
+ * Five third-party RS485 sensors on the 485E port (2026-11-09, coco drip-to-waste line; A/B on
+ * board-2 terminals 15/17, GND 19/20). The CM4
+ * scanner polls them in the background and keeps their data in the process image; your code and
+ * any external master then just read/write memory.
+ *   addr 1    : air temperature/humidity transmitter (FC03 0x0000 = RH x10, 0x0001 = T x10 i16)
+ *   addr 2..5 : coco substrate probes, FDR (FC03 0x0000 = T x10 i16, 0x0001 = moisture x10)
+ * All 9600 8N1; addresses were set on the bench with tools/u485_th_sensor.py and
+ * tools/u485_soil_sensor.py (each sensor alone on a USB-RS485 adapter, then power-cycled to
+ * prove the setting sticks). These cheap slaves answer 12..18 ms after a request and need ~10 ms
+ * of bus silence between frames: hence the last two columns of their rows (reply timeout 60 ms,
+ * 20 ms bus silence before each request). Rows without them (7 initializers) use the defaults.
  * `start` = the address inside that device (from its manual). `period` = poll interval in base
  * ticks (1 tick = 1 ms).
  *
@@ -49,11 +55,13 @@
  * also how you budget bus bandwidth between modules. */
 static app_io_point_t s_io_table[] = {   /* size comes from the rows below, so the check is real
                                           * (RAM: the bench `pulse` command shortens the relay period) */
-  /* port,          addr, access,             flags, start, count, period */
-  { APP_PORT_485A,  1,    APP_IO_IN_DISCRETE, 0,     0,     12,    20  },  /* PT_DI: 12 DI  <- FC02 */
-  { APP_PORT_485A,  2,    APP_IO_IN_INPUT_REG,0,     0,     8,     100 },  /* PT_AI:  8 AI  <- FC04 */
-  { APP_PORT_485A,  1,    APP_IO_OUT_COILS,   0,     0,     8,     20  },  /* PT_DO:  8 DO  -> FC15 */
-  { APP_PORT_485A,  3,    APP_IO_OUT_HOLDING, 0,     0,     8,     100 },  /* PT_AO:  8 AO  -> FC16 */
+  /* port,          addr, access,             flags, start, count, period, [timeout_ms, gap_ms] */
+  /* Thermal / moisture processes: 2 s polling is plenty and keeps the shared wire quiet. */
+  { APP_PORT_485E,  1,    APP_IO_IN_HOLDING,  0,     0,     2,     2000, 60, 20 }, /* PT_AIR:   RH x10, T x10       */
+  { APP_PORT_485E,  2,    APP_IO_IN_HOLDING,  0,     0,     2,     2000, 60, 20 }, /* PT_COCO1: T x10, moisture x10 (cucumber pot A) */
+  { APP_PORT_485E,  3,    APP_IO_IN_HOLDING,  0,     0,     2,     2000, 60, 20 }, /* PT_COCO2 (eggplant pot A) */
+  { APP_PORT_485E,  4,    APP_IO_IN_HOLDING,  0,     0,     2,     2000, 60, 20 }, /* PT_COCO3 (cucumber pot B) */
+  { APP_PORT_485E,  5,    APP_IO_IN_HOLDING,  0,     0,     2,     2000, 60, 20 }, /* PT_COCO4 (eggplant pot B) */
   /* A 16-channel relay module on the internal backplane at DIP address 2. The backplane is
    * plain Modbus, so it is just two more rows: one to drive the relays, one to read their real
    * state back (FC01) rather than trusting the commanded value. */
@@ -63,11 +71,65 @@ static app_io_point_t s_io_table[] = {   /* size comes from the rows below, so t
    * the vent controller (app_vent.c) reads air temperature t2 from here. 1 s is plenty
    * for a thermal process and costs the backplane next to nothing. */
   { APP_PORT_BACKPLANE, 4, APP_IO_IN_INPUT_REG,0,     0x0108,8,     1000 }, /* PT_PHEC: pH/EC/temps */
+  /* Coco drip-to-waste line (2026-10-26, greenhouse system configuration doc section 2.6): the EX_16DI at
+   * address 1 carries the reservoir floats (low / full / overflow / fresh-water low / runoff
+   * seen), the second PH_EC at address 5 reads the batch reservoir (ec1/ph1) and the runoff
+   * sample jar (ec2/ph2). Both are bound in k_ferti_coco below. */
+  { APP_PORT_BACKPLANE, 1, APP_IO_IN_DISCRETE, 0,     0,     16,    100 },  /* PT_DI16: floats */
+  { APP_PORT_BACKPLANE, 5, APP_IO_IN_INPUT_REG,0,     0x0108,8,     1000 }, /* PT_PHEC2: coco pH/EC/temps */
 };
 /* Add a row above and a name in app_user_points.h, in the same order — this catches forgetting
  * either side at build time instead of silently addressing the wrong point at run time. */
 _Static_assert(sizeof(s_io_table) / sizeof(s_io_table[0]) == PT_COUNT,
                "s_io_table and the point names in app_user_points.h are out of sync");
+
+/* ---- fertigation systems (app_ferti.h): bindings = which points/channels are whose ---- */
+#include "app_ferti.h"
+static const ferti_bind_t k_ferti_nft = {
+  .name = "nft", .kind = FERTI_NFT,
+  .ec = { FERTI_AI(PT_PHEC, 2), FERTI_AI(PT_PHEC, 3) },      /* ec1, ec2 */
+  .ph = { FERTI_AI(PT_PHEC, 0), FERTI_AI(PT_PHEC, 1) },      /* ph1, ph2 */
+  .t_water = FERTI_AI_NA, .ec_runoff = FERTI_AI_NA, .ph_runoff = FERTI_AI_NA,
+  .pump = { FERTI_PIN(PT_RELAY, 0), FERTI_PIN(PT_RELAY, 1), FERTI_PIN(PT_RELAY, 2), FERTI_PIN(PT_RELAY, 3) },   /* A B acid base = O1..O4 */
+  .fill = FERTI_PIN_NA, .stir = FERTI_PIN_NA, .irr = FERTI_PIN_NA, .circ = FERTI_PIN_NA, .air = FERTI_PIN_NA,
+  .di_low = FERTI_PIN_NA, .di_full = FERTI_PIN_NA, .di_overflow = FERTI_PIN_NA, .di_fresh_low = FERTI_PIN_NA, .di_runoff = FERTI_PIN_NA,
+  .di_inv = 0U,
+  .moisture = { FERTI_AI_NA, FERTI_AI_NA, FERTI_AI_NA, FERTI_AI_NA },
+  .meter = FERTI_PIN(FERTI_PT_HSDI, 0), .meter_ppl = 660U,      /* top-up water meter on HSDI0 (= app_flow_dl) */
+  .flow_lock = 1U,
+};
+__attribute__((section(".axisram"), aligned(32))) static ferti_sys_t s_ferti_nft;    /* CPU-only state, off DTCM (ferti_open zeroes it) */
+
+/* Coco drip-to-waste line (kind DTW): 20 L reservoir kept full by a mechanical float valve on
+ * the tap (no refill actuator); the inlet pulse meter on HSDI1 reports every litre that comes
+ * in and the chemistry loop doses for it at once (the NFT top-up feed-forward), so irrigation
+ * never waits. Overflow float = safety, runoff float = irrigation check. With a solenoid valve
+ * instead of the float valve, bind .fill/.di_low/.di_full and the batch state machine takes
+ * over (fill -> dose -> stir -> verify -> ready). Wiring per
+ * the greenhouse system configuration doc, section 2.6: pumps A/B/pH = O5/O6/O7 (one pH pump, bottle decides the
+ * direction), irrigation pump O10 and transfer pump O11 through interposing relays, stir O8;
+ * floats on the EX_16DI (address 1): DI1 low, DI2 full, DI3 overflow (normally closed),
+ * DI4 fresh-water low (normally closed), DI5 runoff seen; PH_EC #2 (address 5): ec1/ph1 in
+ * the reservoir, ec2/ph2 in the runoff sample jar. Inlet pulse meter on HSDI1 measures each
+ * batch (feed-forward on real litres) and guards a stuck float / leaking valve. Addressed as `dose coco ...`; files dose_coco.cfg/.lrn; heartbeat "dose_coco". */
+static const ferti_bind_t k_ferti_coco = {
+  .name = "coco", .kind = FERTI_DTW,
+  .ec = { FERTI_AI(PT_PHEC2, 2), FERTI_AI_NA },             /* reservoir ec1 */
+  .ph = { FERTI_AI(PT_PHEC2, 0), FERTI_AI_NA },             /* reservoir ph1 */
+  .t_water = FERTI_AI(PT_PHEC2, 6),                         /* t3 = temp-pH1 */
+  .ec_runoff = FERTI_AI(PT_PHEC2, 3), .ph_runoff = FERTI_AI(PT_PHEC2, 1),   /* sample jar ec2/ph2 */
+  .pump = { FERTI_PIN(PT_RELAY, 4), FERTI_PIN(PT_RELAY, 5), FERTI_PIN(PT_RELAY, 6), FERTI_PIN(PT_RELAY, 6) },   /* A=O5 B=O6 pH=O7 (acid and base share it) */
+  .fill = FERTI_PIN_NA, .stir = FERTI_PIN(PT_RELAY, 7), .irr = FERTI_PIN(PT_RELAY, 9),   /* no refill actuator (float valve on the reservoir, 2026-10-26 evening); stir O8, irrigation O10 */
+  .circ = FERTI_PIN_NA, .air = FERTI_PIN_NA,
+  .di_low = FERTI_PIN(PT_DI16, 0), .di_full = FERTI_PIN_NA, .di_overflow = FERTI_PIN(PT_DI16, 2),   /* float valve keeps the level: low float (DI1) = valve failed / supply off -> irrigation held; overflow guard (DI3) */
+  .di_fresh_low = FERTI_PIN_NA, .di_runoff = FERTI_PIN_NA,  /* sample-jar float not wired yet (2026-10-27: only the two reservoir floats are in) -> bind FERTI_PIN(PT_DI16, 4) when it is */
+  .di_inv = FERTI_DI_OVERFLOW | FERTI_DI_FRESH_LOW,         /* overflow float: normally closed, open = asserted. Low float as mounted
+                                                              * (2026-10-27, measured): OPEN with water, CLOSES when the level drops -> not inverted */
+  .moisture = { FERTI_AI_NA, FERTI_AI_NA, FERTI_AI_NA, FERTI_AI_NA },
+  .meter = FERTI_PIN(FERTI_PT_HSDI, 1), .meter_ppl = 1200U,   /* inlet pulse meter on HSDI1: measured batch volume, overrun and leak guards */
+  .flow_lock = 0U,
+};
+__attribute__((section(".axisram"), aligned(32))) static ferti_sys_t s_ferti_coco;
 
 /* The "input edge toggles a relay" demo is GONE (2026-09-03): HSDI4~7 now carry the four
  * gutter level sensors and HSDI0 the water meter -- on this installation no onboard input
@@ -94,7 +156,8 @@ static app_hsdi_ch_t s_hsdi_table[8] = {   /* RAM copy: `hsdi <ch> <mode> ...` r
   /* mode,               filter, edge,                 z_action, debounce_ms, min_us */
   { APP_HSDI_COUNT_CAP,  15, APP_HSDI_EDGE_RISING,  0,        0,  1000 },  /* HSDI0  water meter: same hall type as the gutter meters,
                                                                            * same treatment (was a TIM3 hardware counter, filter 4) */
-  { APP_HSDI_DI,         0,  0,                     0,        10, 0    },  /* HSDI1  spare (PC7) */
+  { APP_HSDI_COUNT_CAP,  15, APP_HSDI_EDGE_RISING,  0,        0,  1000 },  /* HSDI1  coco reservoir inlet meter (PC7; 1200 p/L hall meter on the
+                                                                           * refill valve line, 2026-10-26: measured batch + stuck-float / leak guards) */
   { APP_HSDI_DI,         0,  0,                     0,        10, 0    },  /* HSDI2  spare (PB0) */
   { APP_HSDI_DI,         0,  0,                     0,        10, 0    },  /* HSDI3  spare (PB1) */
   /* HSDI4~7 = per-gutter hall flow meters 1~4 (2026-09-03, 1200 p/L; terminals 2/4, 7/9, 8/10, 12/14).
@@ -118,7 +181,7 @@ static app_hsdi_ch_t s_hsdi_table[8] = {   /* RAM copy: `hsdi <ch> <mode> ...` r
 };
 
 /* ---- 1c. Ports ---- */
-#define CFG_FIELD_PORT   APP_PORT_485A   /* where the field devices above are wired */
+#define CFG_FIELD_PORT   APP_PORT_485E   /* where the field devices above are wired (board-2 terminals 15/17, 2026-11-09) */
 #define CFG_FIELD_BAUD   9600
 #define CFG_HMI_PORT     APP_PORT_485B   /* where an HMI / SCADA reads the same data (slave) */
 #define CFG_HMI_ADDR     10              /* must not clash with the field device addresses */
@@ -135,31 +198,19 @@ static void control_task(void *arg)
   (void)arg;
   for (;;)
   {
-    /* --- read the field (kept fresh in the background by the scanner) --- */
-    uint8_t  start_button = app_io_di(PT_DI, 0);
-    uint16_t level        = app_io_ai(PT_AI, 0);
-
     /* --- read the onboard high-speed inputs --- */
     uint32_t flow_pulses  = app_hsdi_count(0);      /* HSDI0 hardware counter */
-    uint8_t  limit_switch = app_hsdi_level(1);      /* HSDI1 plain input */
     flow_topup_poll(flow_pulses);                   /* water-meter top-up ledger (below) */
 
-    /* (the HSDI-edge-toggles-relay demo used to sit here; retired 2026-09-03, see 1b) */
+    /* (the HSDI-edge-toggles-relay demo used to sit here; retired 2026-09-03, see 1b;
+     *  the template pump/valve demo on the old 485A rows retired 2026-11-09 when the real
+     *  field sensors arrived on 485E — read them with app_io_ai(PT_AIR, 1) etc. when a rule
+     *  needs them; app_user_hb_more() below already publishes them) */
 
     /* --- bench pulse source (`pulse <coil>`): toggle one relay every control tick = 25 Hz
      * square wave, the same order of magnitude as the greenhouse flow meters that trip the
      * UNNAMED reset. Wire that relay's contact so it switches 24 V into an HSDI A/B pair. --- */
     /* (relay toggling moved to pulse_task, 1 ms resolution — see `pulse` below) */
-
-    /* --- your logic --- */
-    uint8_t  pump_on  = (start_button && !limit_switch && (level < 500U)) ? 1U : 0U;
-    uint16_t valve_sp = (flow_pulses > 10000UL) ? 0U : 4000U;
-
-    /* --- drive the field --- */
-    app_io_do_set(PT_DO, 0, pump_on);
-    app_io_hr_set(PT_AO, 0, valve_sp);
-
-    if (app_io_ok(PT_AI) == 0) { /* ... that device is not answering ... */ }
 
     vTaskDelay(pdMS_TO_TICKS(20));   /* your control rate, independent of the bus scan rate */
   }
@@ -184,6 +235,53 @@ uint32_t app_demo_count(uint8_t idx)       /* heartbeat c0..c4 = HSDI0 (water me
 {
   static const uint8_t ch[5] = { 0, 4, 5, 6, 7 };   /* c2 = HSDI5 (gutter 2 meter on terminals 7/9 lands there, 2026-09-03 evening) */
   return (idx < 5U) ? app_hsdi_count(ch[idx]) : 0U;
+}
+
+/* ---- 485E field sensors -> cloud (2026-11-09) ----
+ * Heartbeat fragment (leading commas) plus the matching desc groups/points; the dashboard renders
+ * the two cards generically from the desc. A sensor whose scan is failing is OMITTED from the
+ * heartbeat, so the dash shows a gap instead of a stale number (same rule as the PH_EC 0x7FFF
+ * sentinel). Raw wire scaling (x10) travels as-is; the desc carries scale 0.1. */
+const char *app_user_hb_more(void)
+{
+  static char b[192];
+  int n = 0;
+  b[0] = 0;
+  if (app_io_ok(PT_AIR) > 0)
+  {
+    n += snprintf(b + n, sizeof(b) - (size_t)n, ",\"at\":%d,\"arh\":%u",
+                  (int)(int16_t)app_io_ai(PT_AIR, 1), (unsigned)app_io_ai(PT_AIR, 0));
+  }
+  for (uint16_t k = 0; k < 4U; k++)
+  {
+    uint16_t pt = (uint16_t)(PT_COCO1 + k);
+    if ((app_io_ok(pt) > 0) && (n >= 0) && ((size_t)n < sizeof(b)))
+    {
+      n += snprintf(b + n, sizeof(b) - (size_t)n, ",\"cm%u\":%u,\"ct%u\":%d",
+                    (unsigned)(k + 1U), (unsigned)app_io_ai(pt, 1),
+                    (unsigned)(k + 1U), (int)(int16_t)app_io_ai(pt, 0));
+    }
+  }
+  if ((n < 0) || ((size_t)n >= sizeof(b))) { b[0] = 0; }   /* never hand back a truncated fragment */
+  return b;
+}
+const char *app_user_desc_groups(void)   /* appended to the desc "groups" array (leading commas) */
+{
+  return ",{\"id\":\"air\",\"name\":\"485E n1: Greenhouse Air\"}"
+         ",{\"id\":\"coco\",\"name\":\"485E n2-n5: Coco Substrate\"}";
+}
+const char *app_user_desc_points(void)   /* appended to the desc "points" array (trailing commas) */
+{
+  return "{\"id\":\"air.t\",\"name\":\"Air Temperature\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"℃\",\"scale\":0.1,\"group\":\"air\",\"f\":\"at\"},"
+         "{\"id\":\"air.rh\",\"name\":\"Air Humidity\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%RH\",\"scale\":0.1,\"group\":\"air\",\"f\":\"arh\"},"
+         "{\"id\":\"coco.m1\",\"name\":\"Moisture 1 Cucumber A\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"cm1\"},"
+         "{\"id\":\"coco.m2\",\"name\":\"Moisture 2 Eggplant A\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"cm2\"},"
+         "{\"id\":\"coco.m3\",\"name\":\"Moisture 3 Cucumber B\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"cm3\"},"
+         "{\"id\":\"coco.m4\",\"name\":\"Moisture 4 Eggplant B\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"%\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"cm4\"},"
+         "{\"id\":\"coco.t1\",\"name\":\"Substrate Temp 1 Cucumber A\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"℃\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"ct1\"},"
+         "{\"id\":\"coco.t2\",\"name\":\"Substrate Temp 2 Eggplant A\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"℃\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"ct2\"},"
+         "{\"id\":\"coco.t3\",\"name\":\"Substrate Temp 3 Cucumber B\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"℃\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"ct3\"},"
+         "{\"id\":\"coco.t4\",\"name\":\"Substrate Temp 4 Eggplant B\",\"kind\":\"num\",\"rw\":\"ro\",\"unit\":\"℃\",\"scale\":0.1,\"group\":\"coco\",\"f\":\"ct4\"},";
 }
 
 /* ---- bench test commands (2026-09-03 evening, UNNAMED-reset reproduction) ----
@@ -561,9 +659,17 @@ void app_user_init(void)
    * relay coils 13..15, air temperature from PT_PHEC. "vent" on CLI/cloud to override. */
   app_vent_init();
 
-  /* nutrient/pH dosing (app_dose.c): three peristaltic pumps on relay coils 0..2,
-   * EC/pH from PT_PHEC. Boots in OFF (pumps held off) — "dose" on CLI/cloud to operate. */
-  app_dose_init();
+  /* fertigation (app_ferti.c): one instance per reservoir. The greenhouse NFT line: four
+   * peristaltic pumps on relay coils 0..3 (panel O1..O4), EC/pH from the PH_EC module at
+   * backplane address 4 (two probes each, mean with divergence guard), top-up water meter on
+   * HSDI0 (660 pulses/L), dosing held while app_flowmon reports the feed supply lost. No
+   * hydraulics bound: the float valve refills on its own. First instance = answers plain
+   * `dose ...`, keeps the "dose.cfg"/"dose.lrn" files and the "dose" heartbeat field. */
+  if (ferti_open(&s_ferti_nft, &k_ferti_nft) != 0) { printf("[DOSE] nft open failed\n\r"); }
+  /* second system: the coco drip-to-waste line (`dose coco ...`). Boots OFF like the first;
+   * its pumps, floats and second PH_EC are listed in k_ferti_coco. */
+  if (ferti_open(&s_ferti_coco, &k_ferti_coco) != 0) { printf("[DOSE] coco open failed\n\r"); }
+  ferti_start();
 
   /* per-gutter feed-flow monitor (app_flowmon.c): a gutter whose feed flow stays below
    * 1.2 L/min for 2 min is probably blocked -> FAULT event + live cloud alarm (phone push

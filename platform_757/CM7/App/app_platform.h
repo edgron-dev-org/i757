@@ -83,6 +83,12 @@ typedef struct {
   uint16_t start;   /* first coil / register address */
   uint16_t count;   /* qty (bits for coils/discrete, words for registers) */
   uint16_t period;  /* poll interval in base ticks; 0 = entry disabled */
+  /* Optional timing for third-party devices on the front ports (ignored on the backplane, whose
+   * profile is fixed). Both may be left 0 (rows written with 7 initializers still compile). */
+  uint8_t  timeout_ms; /* reply timeout in ms, 0 = platform default (60 ms) */
+  uint8_t  gap_ms;     /* bus silence the device needs before a request, ms, 0 = none (cheap
+                        * sensors typically need 10..20: they ignore a request that follows the
+                        * previous frame too closely) */
 } app_io_point_t;
 
 /* Register the scan table once (from app_user_init). base_tick_ms 0 = default 1 ms.

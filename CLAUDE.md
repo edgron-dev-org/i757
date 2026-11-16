@@ -55,15 +55,18 @@ service loop), `app_ota.c`, `app_cli.c` (USB console), `app_mbport.c` / `app_mbc
 `app_p1_stubs.c`, `app_p5_test.c`, `app_anticlone.c`. `app_platform.h` is the one header you include.
 
 **As shipped, `app_user.c` runs Edgron's greenhouse reference application**, not a blank template:
-a scan table for three RS-485 field devices on port 485A (9600 8N1, master) plus a relay module on the
-backplane, port 485B as a Modbus slave (address 10) exposing the same points, a 20 ms `control_task`,
-and four greenhouse features each in its own file: `app_vent.c` (roof vents on relay coils 13–15),
-`app_dose.c` (dosing pumps on coils 0–3, boots OFF), `app_flowmon.c` (feed-flow alarm on HSDI4–7,
+a scan table for five third-party RS-485 sensors on port 485E (9600 8N1, master; one air T/RH transmitter
+and four substrate probes) plus four backplane modules (16DI at address 1, relay module at 2, PH_EC at 4
+and 5), port 485B as a Modbus slave (address 10) exposing the same points, a 20 ms `control_task`,
+and four greenhouse features each in its own file: `app_vent.c` (roof vents on relay coils 13–15, fan on
+coil 11), `app_ferti.c` (fertigation, one instance per reservoir, every I/O bound in a `ferti_bind_t` in
+`app_user.c`: the NFT instance doses on coils 0–3, the coco drip-to-waste instance on coils 4–7 and 9;
+boots OFF; was `app_dose.c`, whose header remains as a thin wrapper), `app_flowmon.c` (feed-flow alarm on HSDI4–7,
 **beeps on a board with no flow meters**, `flow off` on the console silences it), `app_aer.c` (air pump
 on coil 8). To make it yours:
 
 1. Keep §1 configuration tables and §3 startup of `app_user.c` as the pattern; replace the rows with your devices.
-2. Delete the four `app_vent_init()` … `app_aer_init()` calls in `app_user_init()`. Without `init` none
+2. Delete the `app_vent_init()`, `ferti_open()` / `ferti_start()`, `app_flowmon_init()` and `app_aer_init()` calls in `app_user_init()`. Without them none
    of them creates a task, so they do nothing. **Keep the four files in the build for now**: the platform's
    console (`app_cli.c`), heartbeat (`app_mqtt.c`) and data log (`app_datalog.c`) still link against their
    command and status hooks (`app_*_cli`, `app_*_cmd`, `app_vent_stage`, …). Removing them from

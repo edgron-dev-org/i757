@@ -15,13 +15,16 @@
 #define APP_USER_POINTS_H
 
 enum {
-  PT_DI = 0,      /* 12 digital inputs      485A addr 1 */
-  PT_AI,          /*  8 analog inputs       485A addr 2 */
-  PT_DO,          /*  8 digital outputs     485A addr 1 */
-  PT_AO,          /*  8 analog outputs      485A addr 3 */
+  PT_AIR = 0,     /* air T/RH transmitter   485E addr 1 (FC03 0x0000: RH x10, T x10 i16; 2026-11-09) */
+  PT_COCO1,       /* coco substrate probe 1 485E addr 2 (FC03 0x0000: T x10 i16, moisture x10) cucumber pot A */
+  PT_COCO2,       /* coco substrate probe 2 485E addr 3, eggplant pot A */
+  PT_COCO3,       /* coco substrate probe 3 485E addr 4, cucumber pot B */
+  PT_COCO4,       /* coco substrate probe 4 485E addr 5, eggplant pot B */
   PT_RELAY,       /* 16 relay outputs       backplane addr 2 */
   PT_RELAY_RB,    /* 16 relay read-back     backplane addr 2 */
   PT_PHEC,        /*  8 PH_EC eng values    backplane addr 4 (vent control reads t2) */
+  PT_DI16,        /* 16 discrete inputs     backplane addr 1 EX_16DI (coco line floats, 2026-10-26) */
+  PT_PHEC2,       /*  8 PH_EC eng values    backplane addr 5 (coco line reservoir + runoff sample) */
   PT_COUNT        /* keep last */
 };
 

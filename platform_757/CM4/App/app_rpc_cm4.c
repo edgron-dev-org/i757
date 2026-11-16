@@ -34,7 +34,7 @@ extern int      mbfront_cfg_set(uint8_t port, uint8_t role, uint32_t baud,
                                 uint8_t parity, uint8_t stop, uint8_t addr);
 extern uint16_t mbfront_slave_pdu(const uint8_t *pdu, uint16_t n, uint8_t *rsp);
 extern uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
-                                 uint16_t timeout_ms, const uint8_t *pdu, uint16_t pn,
+                                 uint16_t timeout_ms, uint16_t gap_ms, const uint8_t *pdu, uint16_t pn,
                                  uint8_t *rsp_pdu, uint8_t *status);
 extern uint16_t mbfront_stats(uint8_t port, uint8_t *out);
 
@@ -77,7 +77,7 @@ static int rpc_recv_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
     static uint8_t rspA[300];
     uint8_t st = 0;
     uint16_t to = (uint16_t)d[4] | ((uint16_t)d[5] << 8);
-    uint16_t rl = mbfront_transact(d[1], d[2], d[3], to, &d[6], (uint16_t)(len - 6U), &rspA[1], &st);
+    uint16_t rl = mbfront_transact(d[1], d[2], d[3], to, 0U, &d[6], (uint16_t)(len - 6U), &rspA[1], &st);
     rspA[0] = st;
     OPENAMP_send(ept, rspA, (size_t)(1U + rl));
     return 0;

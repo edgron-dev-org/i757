@@ -70,6 +70,8 @@ typedef struct {
   uart_drv_t drv;
   uint8_t    rx[512], tx[300];
   uint8_t    opened, role, addr;
+  uint32_t   last_act;   /* HAL tick of the last frame on this wire (our TX end / the reply): the
+                          * reference for a transaction's gap_ms (bus idle guard, see mbfront_transact) */
 } mbf_port_t;
 
 static mbf_port_t s_p[MBF_NPORT];
@@ -565,8 +567,15 @@ static void port_send(mbf_port_t *p, const uint8_t *d, uint16_t n)
 
 
 /* ---- Master transaction (op0A): one request/one reply on the specified port's bus ---- */
+/* gap_ms = bus silence the addressed device needs before the request (0 = none), measured from the
+ * end of the previous frame on THIS port. Cheap third-party slaves ignore a request that arrives
+ * within ~10 ms of the previous frame (bench 2026-11-09, five sensors on one 9600 bus: 0..5 ms gap =
+ * 40..50 % of polls unanswered, >= 10 ms = zero misses); the standard 3.5-char silence (3.6 ms at
+ * 9600) is not enough, and the UART framing cannot provide it, so the master waits here. Only THIS
+ * bus's thread waits. The scanner feeds each row's gap_ms (contract §3); the RPMsg pass-through
+ * (mbpoll) passes 0. */
 uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
-                          uint16_t timeout_ms, const uint8_t *pdu, uint16_t pn,
+                          uint16_t timeout_ms, uint16_t gap_ms, const uint8_t *pdu, uint16_t pn,
                           uint8_t *rsp_pdu, uint8_t *status)
 {
   mbf_port_t *p;
@@ -590,7 +599,9 @@ uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
   n = mb_adu_build(adu, MB_ADU_MAX, slave, pdu, pn);
   if (n < 0) { *status = 2; bus_cm4_unlock(port); return 0; }
   while (uart_read_frame(&p->drv, f, MB_ADU_MAX) != 0U) {}   /* drain leftover frames (iron rule) */
-  port_send(p, adu, (uint16_t)n);
+  while ((HAL_GetTick() - p->last_act) < (uint32_t)gap_ms) { osDelay(1); }   /* bus idle guard (gap_ms, see above) */
+  port_send(p, adu, (uint16_t)n);                                       /* returns after TX is flushed */
+  p->last_act = HAL_GetTick();
   if (expect == 0U) { *status = 0; bus_cm4_unlock(port); return 0; }   /* broadcast: no reply */
   if (timeout_ms == 0U) { timeout_ms = 100U; }
   if (timeout_ms > 1000U) { timeout_ms = 1000U; }
@@ -625,6 +636,7 @@ uint16_t mbfront_transact(uint8_t port, uint8_t slave, uint8_t expect,
     }
     osDelay(1);                      /* yield: this bus waits, the others keep running */
   }
+  p->last_act = HAL_GetTick();       /* reply (or silence) ended now: the idle guard counts from here */
   bus_cm4_unlock(port);
   return ret;
 }
