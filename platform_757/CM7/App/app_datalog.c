@@ -73,6 +73,33 @@ static struct
 } s_slot[DL_MODS];
 static uint8_t  s_nslot = 0;
 static agg_t    s_temp;               /* onboard CPU temperature, degC */
+
+/* ---- application sample fields (app_datalog_add_field) ----
+ * Values the platform cannot know about: scan-table sensors on a field port, computed
+ * quantities. Each registered field becomes three columns <name>_avg/_min/_max, sub-sampled
+ * with everything else. Registered once at start-up from app_user_init. */
+#define DL_XF 16U
+static struct { char name[9]; app_datalog_get_fn get; uint16_t arg; agg_t a; } s_xf[DL_XF];
+static volatile uint8_t s_nxf = 0;
+
+int app_datalog_add_field(const char *name, app_datalog_get_fn get, uint16_t arg)
+{
+  uint8_t n = s_nxf, k, len;
+  if ((name == NULL) || (get == NULL) || (n >= DL_XF)) { return -1; }
+  len = (uint8_t)strlen(name);
+  if ((len == 0U) || (len > 8U)) { return -1; }
+  for (k = 0; k < len; k++)             /* a column name: lower-case letters and digits only */
+  {
+    char c = name[k];
+    if (!(((c >= 'a') && (c <= 'z')) || ((c >= '0') && (c <= '9')))) { return -1; }
+  }
+  for (k = 0; k < n; k++) { if (strcmp(s_xf[k].name, name) == 0) { return -1; } }
+  memset(&s_xf[n], 0, sizeof s_xf[0]);
+  memcpy(s_xf[n].name, name, len);
+  s_xf[n].get = get; s_xf[n].arg = arg;
+  s_nxf = (uint8_t)(n + 1U);            /* published last: the poll loop only sees complete entries */
+  return 0;
+}
 static uint32_t s_win_id = 0;         /* ts / period of the running window (0 = none) */
 /* Field names in ENGINEERING-BLOCK order. Temp naming follows the 2026-09-01 user
  * convention (t1=temp-EC1/outdoor, t2=temp-EC2/air, t3=temp-pH1/water, t4=temp-pH2/water)
@@ -472,6 +499,7 @@ static void dl_win_reset(void)
     s_nslot++;
   }
   memset(&s_temp, 0, sizeof s_temp);
+  for (i = 0; i < s_nxf; i++) { memset(&s_xf[i].a, 0, sizeof s_xf[0].a); }
 }
 
 static void agg_add(agg_t *a, int32_t v)
@@ -486,6 +514,11 @@ static void dl_subsample(void)
 {
   uint8_t i;
   agg_add(&s_temp, (int32_t)app_temp_read());
+  for (i = 0; i < s_nxf; i++)           /* application fields: an invalid sample is simply skipped */
+  {
+    int32_t v = 0;
+    if (s_xf[i].get(s_xf[i].arg, &v) == 1) { agg_add(&s_xf[i].a, v); }
+  }
   for (i = 0; i < s_nslot; i++)
   {
     uint8_t q[8], r[80];
@@ -576,6 +609,10 @@ static void dl_build_header(char *out, uint16_t cap)
                                 (unsigned)s_slot[i].addr, (unsigned)(k + 1U));
       }
     }
+  }
+  for (i = 0; i < s_nxf; i++)           /* application fields last: module columns keep their positions */
+  {
+    n = app_sncat(out, (uint16_t)n, cap, ",%s_avg,%s_min,%s_max", s_xf[i].name, s_xf[i].name, s_xf[i].name);
   }
   if (n < cap) { snprintf(&out[n], (size_t)(cap - n), "\n"); }
 }
@@ -706,6 +743,10 @@ static void dl_flush_row(uint32_t win_end_ts)
         else { n = app_sncat(s_line, (uint16_t)n, sizeof s_line, ","); }
       }
     }
+  }
+  for (i = 0; i < s_nxf; i++)
+  {
+    if (n < sizeof s_line - 40U) { n += row_agg(&s_line[n], (uint16_t)(sizeof s_line - n), &s_xf[i].a); }
   }
   if (n < sizeof s_line - 1U) { s_line[n++] = '\n'; s_line[n] = 0; }
   { char fname[28];

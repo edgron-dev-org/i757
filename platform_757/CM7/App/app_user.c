@@ -242,6 +242,19 @@ uint32_t app_demo_count(uint8_t idx)       /* heartbeat c0..c4 = HSDI0 (water me
  * the two cards generically from the desc. A sensor whose scan is failing is OMITTED from the
  * heartbeat, so the dash shows a gap instead of a stale number (same rule as the PH_EC 0x7FFF
  * sentinel). Raw wire scaling (x10) travels as-is; the desc carries scale 0.1. */
+/* History columns for the same sensors (app_datalog_add_field). arg packs the point, the
+ * register index and whether the value is a signed int16: (point << 4) | (index << 1) | signed. */
+#define DLF(pt, idx, sgn)  (uint16_t)(((uint16_t)(pt) << 4) | ((uint16_t)(idx) << 1) | (uint16_t)(sgn))
+static int dl_get_io(uint16_t arg, int32_t *value)
+{
+  uint16_t pt = (uint16_t)(arg >> 4), idx = (uint16_t)((arg >> 1) & 0x7U);
+  uint16_t raw;
+  if (app_io_ok(pt) <= 0) { return 0; }          /* sensor silent: leave the window empty */
+  raw = app_io_ai(pt, idx);
+  *value = ((arg & 1U) != 0U) ? (int32_t)(int16_t)raw : (int32_t)raw;
+  return 1;
+}
+
 const char *app_user_hb_more(void)
 {
   static char b[192];
@@ -653,6 +666,17 @@ void app_user_init(void)
    * serves the identical map at the identical addresses. Run 'pio dump' on the USB console to
    * print the external address of every point for whoever integrates the HMI. */
   app_mbport_configure(CFG_HMI_PORT, APP_MB_SLAVE, CFG_FIELD_BAUD, 'N', 1, CFG_HMI_ADDR);
+
+  /* the 485E field sensors also go into the on-board history, under their heartbeat names */
+  (void)app_datalog_add_field("at",  dl_get_io, DLF(PT_AIR, 1, 1));
+  (void)app_datalog_add_field("arh", dl_get_io, DLF(PT_AIR, 0, 0));
+  { static const char *const cm[4] = { "cm1", "cm2", "cm3", "cm4" };
+    static const char *const ct[4] = { "ct1", "ct2", "ct3", "ct4" };
+    for (uint16_t k = 0; k < 4U; k++)
+    {
+      (void)app_datalog_add_field(cm[k], dl_get_io, DLF(PT_COCO1 + k, 1, 0));
+      (void)app_datalog_add_field(ct[k], dl_get_io, DLF(PT_COCO1 + k, 0, 1));
+    } }
 
   /* your task(s). Stack size is in WORDS (1024 words = 4 KB). */
   xTaskCreate(control_task, "ctrl", 1024, NULL, APP_TASK_PRIO_NORMAL, NULL);

@@ -200,4 +200,17 @@ void app_beep_set(uint8_t on);   /* buzzer on/off */
  * a small RAM queue is drained by the platform). */
 void app_log_event(const char *type, const char *fmt, ...);
 
+/* Record a value of your own in the on-board history (and so on the dashboard's history page).
+ * One call per quantity from app_user_init: three CSV columns <name>_avg/_min/_max appear,
+ * sub-sampled every 5 s. get(arg, &value) returns 1 with a value, anything else when there is
+ * no valid reading right now. name: 1..8 lower-case letters/digits; use the same name as the
+ * heartbeat field and the desc "f" entry and the dashboard labels and scales the curve itself.
+ * At most 16 fields. Returns 0, or -1 (bad name, duplicate, table full). The getter runs on
+ * the platform's main loop: return a cached value (app_io_ai), never block. */
+#ifndef APP_DATALOG_GET_FN_DEFINED
+#define APP_DATALOG_GET_FN_DEFINED
+typedef int (*app_datalog_get_fn)(uint16_t arg, int32_t *value);
+#endif
+int app_datalog_add_field(const char *name, app_datalog_get_fn get, uint16_t arg);
+
 #endif /* APP_PLATFORM_H */

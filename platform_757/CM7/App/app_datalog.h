@@ -18,6 +18,20 @@ void app_datalog_poll(void);   /* mqtt main loop, every 500 ms tick (lazy init o
  * Formats into a small RAM queue (no filesystem I/O here) — safe from any task context. */
 void app_log_event(const char *type, const char *fmt, ...);
 
+/* Application sample fields (SDK-facing, also declared in app_platform.h).
+ * Adds one recorded quantity: three CSV columns <name>_avg/_min/_max, sub-sampled every 5 s
+ * like the module channels. get(arg, &value) returns 1 with a value, anything else = no
+ * valid sample this time (the column stays empty for a window with none). name: 1..8
+ * characters, lower-case letters and digits, and the same as the heartbeat field / desc "f"
+ * so the dashboard labels and scales the curve by itself. Call from app_user_init, at most
+ * 16 fields. Returns 0, or -1 (bad name, duplicate, table full). The getter runs on the
+ * platform's main loop: read a cached value (app_io_ai), never block. */
+#ifndef APP_DATALOG_GET_FN_DEFINED
+#define APP_DATALOG_GET_FN_DEFINED
+typedef int (*app_datalog_get_fn)(uint16_t arg, int32_t *value);
+#endif
+int app_datalog_add_field(const char *name, app_datalog_get_fn get, uint16_t arg);
+
 /* Internal producers (CLI / cloud / recorder) with explicit source tag. */
 void app_log_event_src(const char *type, const char *src, const char *fmt, ...);
 
