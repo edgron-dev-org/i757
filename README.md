@@ -17,6 +17,7 @@ platform_757/        Full buildable dual-core firmware project
 modbus/              Transport-agnostic Modbus core (RTU + TCP share it)
 uartdrv/             Multi-instance UART driver
 docs/                Manuals + interface contracts (the authoritative specs)
+hardware/            Schematics (PDF): controller main board, Board 2, EX-16DO module
 tools/               OTA push / broker setup scripts
 ```
 
