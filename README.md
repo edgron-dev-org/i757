@@ -3,6 +3,8 @@
 Firmware SDK for the **I757-M** modular industrial controller (STM32H757 dual-core).
 Build your own application on top of the platform, or integrate over the cloud API.
 
+Hardware, pricing and ordering: [edgron.com](https://edgron.com) · Live greenhouse data: [dash.edgron.com/public](https://dash.edgron.com/public)
+
 ## What's here
 
 ```
