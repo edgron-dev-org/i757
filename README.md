@@ -20,7 +20,7 @@ Hardware, pricing and ordering: [edgron.com](https://edgron.com)
 <p align="center">
   <img src="docs/img/i757_main_board.jpg" width="250" alt="I757-M main board: STM32H757, SDRAM, Ethernet">
   &nbsp;
-  <img src="docs/img/greenhouse_cabinet.jpg" width="444" alt="The controller in its cabinet in the greenhouse">
+  <img src="docs/img/greenhouse_tunnel.jpg" width="444" alt="Inside the greenhouse the controller runs: NFT channels of lettuce">
 </p>
 
 | | |
