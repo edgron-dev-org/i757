@@ -1,9 +1,70 @@
 # I757-M Controller SDK
 
-Firmware SDK for the **I757-M** modular industrial controller (STM32H757 dual-core).
-Build your own application on top of the platform, or integrate over the cloud API.
+<p align="center">
+  <img src="docs/img/i757_unit.jpg" width="420" alt="I757-M controller with EX-16DO, EX-16DI and PH_EC expansion modules on a DIN rail">
+</p>
 
-Hardware, pricing and ordering: [edgron.com](https://edgron.com) · Live greenhouse data: [dash.edgron.com/public](https://dash.edgron.com/public)
+The complete firmware source for the **I757-M**, a DIN-rail modular industrial controller built on
+the dual-core **STM32H757**, together with its manuals, interface specifications and schematics.
+Write your own application on top of the platform, or leave the firmware alone and integrate over
+Modbus or MQTT.
+
+This is the same code that runs the hardware we sell, and the same code that has been running our
+own hydroponic greenhouse since August 2026. The greenhouse's readings are public:
+[dash.edgron.com/public](https://dash.edgron.com/public).
+
+Hardware, pricing and ordering: [edgron.com](https://edgron.com)
+
+## The hardware
+
+<p align="center">
+  <img src="docs/img/i757_main_board.jpg" width="250" alt="I757-M main board: STM32H757, SDRAM, Ethernet">
+  &nbsp;
+  <img src="docs/img/greenhouse_cabinet.jpg" width="444" alt="The controller in its cabinet in the greenhouse">
+</p>
+
+| | |
+|---|---|
+| MCU | STM32H757XIH6. Cortex-M7 at 480 MHz for network, TLS, storage and your application; Cortex-M4 at 240 MHz for real-time I/O |
+| Memory | 2 MB dual-bank flash, 1 MB RAM; 32 MB SDRAM and 32 MB SPI flash on Pro / Full; microSD |
+| Field buses | 6 × RS-485 (each Modbus RTU master or slave), 2 × CAN (one isolated), Ethernet (Modbus TCP, MQTT over TLS) |
+| On-board I/O | 8 isolated high-speed inputs (DI, counter or encoder), USB-C service console |
+| Expansion | Up to 16 modules on a Modbus RTU backplane, discovered automatically |
+| Identity | ATECC608A secure element; the device's private key never leaves the chip |
+| Supply / size | 9–36 V DC, approx. 90 × 105 × 83 mm, 35 mm DIN rail |
+
+Expansion modules, each of which also works on its own as a plain Modbus RTU slave for any PLC or PC:
+
+| Module | What it is | Manual |
+|---|---|---|
+| EX-16DO | 16 isolated PhotoMOS outputs, 1 A per channel, AC or DC loads | [manual](docs/EX_16DO_Module_Manual.md) · [schematic](hardware/EX_16DO_Schematic.pdf) |
+| EX-16DI | 16 isolated polarity-free inputs, debounce and a 32-bit counter per channel | [manual](docs/EX_16DI_Module_Manual.md) |
+| PH_EC | 2 × pH, 2 × EC, 4 × temperature water-quality transmitter | [manual](docs/PH_EC_Transmitter_User_Manual.md) |
+| EX-BUS | Passive power and RS-485 entry board for a module row | [manual](docs/EX_BUS_Module_Manual.md) |
+
+Schematics of the controller's two boards and the EX-16DO are in [`hardware/`](hardware/).
+
+## What the firmware does
+
+- **Cyclic I/O scanning into a process image.** The M4 core polls every Modbus port and the
+  backplane from one scan table; your code reads and writes named points without blocking.
+- **Your application as ordinary FreeRTOS tasks**, in one file (`platform_757/CM7/App/app_user.c`),
+  against one header (`app_platform.h`).
+- **Over-the-air updates that cannot brick the board.** Signed images, A/B flash banks, a trial
+  period and automatic rollback if the new image does not confirm itself. Module firmware is
+  updated over the backplane.
+- **Cloud link over MQTT with mutual TLS.** The board publishes a description of its own points, so
+  a dashboard needs no per-device code. Leave it out with one switch (`APP_ENABLE_CLOUD 0`) for a
+  standalone controller.
+- **On-board data logging**: daily CSV files on microSD or the on-board flash, plus an event
+  journal, both retrievable over the cloud link.
+- **Standard protocols throughout**: Modbus RTU and TCP, MQTT, RPMsg between the cores. Third-party
+  tools can talk to every bus, including the backplane.
+
+As shipped, `app_user.c` is not a blank template. It is the greenhouse application: nutrient and pH
+dosing for two reservoirs, roof-vent and fan control, a feed-flow alarm, and a scan table of
+third-party RS-485 sensors. Read it as a worked example, then replace it with your own
+(`CLAUDE.md` lists what to delete).
 
 ## What's here
 
@@ -29,7 +90,7 @@ tools/               OTA push / broker setup scripts
 0b. **Using expansion modules without the controller** (plain Modbus slaves for your PLC/PC) —
    `docs/Expansion_Modules_Standalone_Quick_Start.md` + `tools/u485_quickstart.py`.
 1. **Hardware & installation** — `docs/i757_Controller_Manual.md` (controller: specs, wiring, operation);
-   expansion modules have their own manuals: `docs/EX_16DO_Module_Manual.md`, `docs/PH_EC_Transmitter_User_Manual.md`
+   expansion modules have their own manuals, linked in the table above
 2. **Software / how to develop your app** — `docs/Software_Manual_Application_Development.md`
    (where to write code, how to call platform services, a worked example)
 3. **Interface contracts** — the `docs/*.md` specs (cloud protocol, Modbus, backplane, RPMsg, security, …)
@@ -61,6 +122,10 @@ Toolchain: arm-none-eabi-gcc + CMake + Ninja (STM32CubeCLT provides all three).
 This SDK contains **no secrets**: no broker passwords, no private keys, no device
 certificates (those are build-generated from your own `keys/`). Each device's mTLS
 private key is generated inside and never leaves the ATECC608A — it cannot be copied.
+
+The two files in [`certs/`](certs/) are public on purpose: a root CA certificate and a
+firmware-signing **public** key, there so that a fresh checkout builds and connects without any
+setup. Their private halves are not in this repository.
 
 ## License
 
