@@ -255,6 +255,14 @@ static int dl_get_io(uint16_t arg, int32_t *value)
   return 1;
 }
 
+/* history getter for a dosing setpoint: arg bit 1 = which system (0 NFT, 1 coco), bit 0 = 0 EC (uS/cm) / 1 pH (x100) */
+static int dl_get_target(uint16_t arg, int32_t *value)
+{
+  const ferti_sys_t *s = ((arg & 2U) != 0U) ? &s_ferti_coco : &s_ferti_nft;
+  *value = ((arg & 1U) != 0U) ? (int32_t)s->p.ph_target : (int32_t)s->p.ec_target;
+  return (*value > 0) ? 1 : 0;                 /* instance not opened yet: leave the window empty */
+}
+
 const char *app_user_hb_more(void)
 {
   static char b[192];
@@ -696,6 +704,13 @@ void app_user_init(void)
    * its pumps, floats and second PH_EC are listed in k_ferti_coco. */
   if (ferti_open(&s_ferti_coco, &k_ferti_coco) != 0) { printf("[DOSE] coco open failed\n\r"); }
   ferti_start();
+  /* dosing setpoints into the on-board history, so the dashboard can draw each target in its measurement's
+   * panel. Column name = the measurement's column group + "t": the NFT loop reads the PH_EC at address 4
+   * (m4ec1/2, m4ph1/2 -> m4ect, m4pht), the coco loop the one at address 5. Same raw scaling as the probes. */
+  (void)app_datalog_add_field("m4ect", dl_get_target, 0U);
+  (void)app_datalog_add_field("m4pht", dl_get_target, 1U);
+  (void)app_datalog_add_field("m5ect", dl_get_target, 2U);
+  (void)app_datalog_add_field("m5pht", dl_get_target, 3U);
 
   /* per-gutter feed-flow monitor (app_flowmon.c): a gutter whose feed flow stays below
    * 1.2 L/min for 2 min is probably blocked -> FAULT event + live cloud alarm (phone push
