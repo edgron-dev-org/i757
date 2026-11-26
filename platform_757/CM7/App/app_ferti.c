@@ -105,7 +105,9 @@ extern lfs_t *app_lfs(void);
 #define SEED_GAIN_BASE     1300U    /* 20 ml -> +0.26 pH (2026-09-11) -> 1.3 (x100)/ml */
 #define SEED_DRIFT_PH      (-625)   /* -0.15 pH/day = -0.625 (x100)/h */
 #define SEED_DRIFT_EC      (-4000)  /* ~ -100 uS/day uptake = -4 uS/h */
-#define DRIFT_PH_MAX       5000     /* |0.05 pH/h| plausibility clamp */
+#define DRIFT_PH_MAX       50000    /* |0.5 pH/h| plausibility clamp. Was 0.05 until 2026-11-26: a tank fed an ammonium-bearing
+                                     * fertiliser acidified 0.2..0.3 pH/h, every 3 h window was thrown away as implausible and
+                                     * the model stayed at -0.012 pH/h - no feed-forward, gain learned low, false no-response */
 #define DRIFT_EC_MAX       50000    /* |50 uS/h| */
 #define LEARN_WINDOW_ML    250L     /* gain = sum(response) / sum(ml) over a forgetting window measured in EFFECTIVE ml */
 #define LEARN_MIN_KEEP_PCT 50L      /* one sample never forgets more than half of the history */
@@ -123,7 +125,9 @@ extern lfs_t *app_lfs(void);
 #define NORESP_STRIKES     3U       /* consecutive no-response shots -> FAULT, auto off */
 /* ---- 2026-11-17 review batch (each ruling is exercised by the host bench in test/host_ferti) ---- */
 #define STRIKE_SUM_MULT    2        /* ... and together they should have moved the tank 2 x STRIKE_MIN_* */
-#define PH_RIDE_MAX        2U       /* pH shots in a row that may ride with an A/B pair (unjudged) before a pH check cycle */
+/* ---- 2026-11-26: a held tank is not a dead pump (bench: acid-tank, dead-base-drift, dead-base-quiet) ---- */
+#define STRIKE_AWAY_DIV    2        /* the run trips at once when the tank ran AWAY by STRIKE_MIN_* / 2 (pH 0.04, EC 5 uS) meanwhile */
+#define PH_RIDE_MAX        2U      /* pH shots in a row that may ride with an A/B pair (unjudged) before a pH check cycle */
 #define PH_ALONE_MAX       6U       /* consecutive cycles the A/B pair may be deferred so that a pH shot can be judged alone */
 #define PH_PLAUS_MIN       300U     /* pH x100: a nutrient tank outside 3.00..9.50 is a probe/ADC fault or a spill - not a number to dose on */
 #define PH_PLAUS_MAX       950U
@@ -165,6 +169,7 @@ extern lfs_t *app_lfs(void);
 #define M_AUTO             FERTI_M_AUTO
 #define M_RELEASE          FERTI_M_RELEASE
 #define AL_OFF             PUMPS
+#define AL_PHHOLD          (PUMPS + 1U)   /* "al.dose[.<name>].ph.hold": pH loop held, a pH pump did not respond */
 #define K_IDLE 0U
 #define K_EC   1U
 #define K_PH   2U
@@ -479,6 +484,16 @@ static void cfg_load(ferti_sys_t *s)
  * gain_ab gain_acid gain_base drift_ph drift_ec [fill_dl sum_ml0 sum_resp0 sum_ml1 sum_resp1
  * sum_ml2 sum_resp2] [fill_mls irr_mls]. An older 5-field file re-seeds the sums from its gains.
  * Written on every learning update; a missing/corrupt file keeps the seeds. `learn reset` deletes it. */
+/* forget a no-response run: one slot, or all three (slot >= 3) */
+static void noresp_clear(ferti_sys_t *s, uint8_t slot)
+{
+  for (uint8_t k = 0; k < 3U; k++)
+  {
+    if ((slot < 3U) && (k != slot)) { continue; }
+    s->strikes[k] = 0U; s->nr_exp[k] = 0; s->nr_mov[k] = 0; s->confirm[k] = 0U;
+  }
+}
+
 static void learn_seed_sums(ferti_sys_t *s, uint8_t slot)   /* make the sums agree with gain[slot] as one reference-size sample */
 {
   s->L.lsum_ml[slot]   = (int32_t)(s_lref[slot] * 100U);
@@ -553,7 +568,7 @@ static void learn_reset(ferti_sys_t *s)
   s->L.drift_ph = SEED_DRIFT_PH; s->L.drift_ec = SEED_DRIFT_EC;
   for (uint8_t k = 0; k < 3U; k++) { learn_seed_sums(s, k); }
   s->L.tu_typ_dl = 0U; s->L.fill_mls = 0U; s->L.irr_mls = 0U;
-  memset(s->strikes, 0, sizeof(s->strikes)); memset(s->nr_exp, 0, sizeof(s->nr_exp)); s->ph_alone = 0U;
+  noresp_clear(s, 3U); s->ph_alone = 0U;
   memset(s->unlearned, 0, sizeof(s->unlearned));
   s->ff_ph = 0; s->ff_ec = 0; s->last.kind = K_IDLE;
   s->acc_dph = 0; s->acc_dec = 0; s->acc_dose_ph = 0; s->acc_dose_ec = 0; s->acc_t = 0;
@@ -781,6 +796,16 @@ static void dose_off_fault(ferti_sys_t *s, const char *reason)   /* a fault drop
   dose_alarm(s, AL_OFF, 1U);
 }
 
+/* 2026-11-26: a pH pump that does not respond no longer takes the whole unit down. The first such trip
+ * (greenhouse NFT, a false one) left the tank without EC and pH control for 5.4 h. Now only the pH loop is
+ * held - same shape as a 24 h cap hold: the EC loop keeps feeding, the phone is paged, `dose auto` re-arms.
+ * The hold is RAM only: a reboot re-arms, and a pump that is still dead trips again after the same few shots. */
+static void dose_ph_hold_fault(ferti_sys_t *s, uint8_t slot)
+{
+  s->phhold = slot;
+  dose_alarm(s, AL_PHHOLD, 1U);
+}
+
 /* alarm ids: first instance "al.dose.<slot>.cap" / "al.dose.off", src "dose" (unchanged);
  * others "al.dose.<name>.<slot>.cap" / "al.dose.<name>.off", src "dose.<name>" */
 static void alarm_id(const ferti_sys_t *s, char *b, size_t cap, const char *leaf)
@@ -792,7 +817,7 @@ static void alarm_id(const ferti_sys_t *s, char *b, size_t cap, const char *leaf
 /* one attempt per 5 s tick per pending slot; the uplink slot is shared with the datalog mirror */
 static void flush_events(ferti_sys_t *s)
 {
-  for (uint8_t k = 0; k <= PUMPS; k++)
+  for (uint8_t k = 0; k <= AL_PHHOLD; k++)
   {
     char js[320], id[40], leaf[24];
     int  n;
@@ -811,6 +836,15 @@ static void flush_events(ferti_sys_t *s)
                    cap_name(s, k), (unsigned)s->p.cap_ml[k],
                    active ? "reached - loop held. CHECK: tube still in tank, stock bottle not empty, pump drawing" : "released",
                    (unsigned long)used, (unsigned long)used);
+    }
+    else if (k == AL_PHHOLD)
+    {
+      alarm_id(s, id, sizeof id, "ph.hold");
+      n = snprintf(js, sizeof js,
+                   "{\"pv\":1,\"ts\":%lu,\"id\":\"%s\",\"src\":\"%s\",\"sev\":\"alarm\",\"state\":\"%s\","
+                   "\"msg\":\"Dosing pH loop %s\",\"val\":0}",
+                   (unsigned long)app_time_now(), id, s->evsrc, active ? "active" : "clear",
+                   active ? "HELD: pH pump no response, EC loop continues. CHECK: tube in tank, bottle not empty, pump drawing" : "re-armed");
     }
     else
     {
@@ -974,16 +1008,40 @@ static void learn_step(ferti_sys_t *s, uint16_t ec, uint16_t ph)
          * learnable miss counts and the trip needs BOTH the strike count and a cumulative expected movement of
          * STRIKE_SUM_MULT x STRIKE_MIN_*: single shots below the noise floor prove nothing, a run of them does.
          * Shots at or above STRIKE_MIN_* trip exactly as before. */
+        int32_t moved = (s->last.kind == K_EC) ? d_ec_f : ((slot == 1U) ? -(d_ph * 1000L) : (d_ph * 1000L));   /* raw, + = this pump's direction */
         if (s->strikes[slot] < 255U) { s->strikes[slot]++; }
         s->nr_exp[slot] = (s->nr_exp[slot] > (0x3FFFFFFFL - expect)) ? 0x3FFFFFFFL : (s->nr_exp[slot] + expect);
+        s->nr_mov[slot] += moved;
         if ((s->strikes[slot] >= NORESP_STRIKES) && (s->nr_exp[slot] >= (int32_t)STRIKE_SUM_MULT * smin))
         {
-          ev(s, "FAULT", "%s %s: %u shots with no response (last %uml moved %ld) -> auto off",
-             s->tag, nm, (unsigned)s->strikes[slot], (unsigned)s->last.ml,
-             (long)((s->last.kind == K_EC) ? d_ec : d_ph));
-          s->strikes[slot] = 0; s->nr_exp[slot] = 0;
-          { char r[40]; snprintf(r, sizeof r, "AUTO OFF: %s pump no response", nm); dose_off_fault(s, r); }
+          /* 2026-11-26 (greenhouse NFT): the tank acidified 0.27 pH/h, the base pump held it at the band edge
+           * with 3 ml every cycle, so every shot netted ~0 pH - three "misses" - and the unit switched itself
+           * off for 5 h with a healthy pump (pH 5.79 -> 4.76). Zero net movement cannot tell a dead pump in a
+           * quiet tank from a working pump that exactly cancels the tank's demand, so the count alone no longer
+           * trips. It trips at once only when the tank ran AWAY during the run (a dead pump under real demand:
+           * the 11-23 snapped tube fell 0.07 pH over its run). A tank that held gets one confirmation shot,
+           * sized to move STRIKE_MIN_* and sent alone; if that one misses as well, the pump is dead. */
+          if (s->last.confirm || (s->nr_mov[slot] <= -(smin / (int32_t)STRIKE_AWAY_DIV)))
+          {
+            ev(s, "FAULT", "%s %s: %u shots with no response (last %uml moved %ld) -> %s",
+               s->tag, nm, (unsigned)s->strikes[slot], (unsigned)s->last.ml,
+               (long)((s->last.kind == K_EC) ? d_ec : d_ph),
+               (slot == 0U) ? "auto off" : "pH loop held, EC loop continues (`dose auto` re-arms)");
+            noresp_clear(s, slot);
+            if (slot == 0U) { char r[40]; snprintf(r, sizeof r, "AUTO OFF: %s pump no response", nm); dose_off_fault(s, r); }
+            else { dose_ph_hold_fault(s, slot); }
+          }
+          else if (!s->confirm[slot])
+          {
+            s->confirm[slot] = 1U;
+            ev(s, "SYSTEM", "%s %s: %u shots without a visible response but the tank held (moved %ld over the run) -> confirmation shot next",
+               s->tag, nm, (unsigned)s->strikes[slot],
+               (long)(((s->last.kind == K_EC) || (slot == 2U)) ? (s->nr_mov[slot] / 1000L) : -(s->nr_mov[slot] / 1000L)));
+          }
         }
+        else if (s->strikes[slot] + 1U >= NORESP_STRIKES) { s->confirm[slot] = 1U; }   /* one short of the count: make the deciding
+                                                                                        * shot the confirmation, so a dead pump still
+                                                                                        * trips on the same shot as before */
       }
       else
       {
@@ -1006,7 +1064,7 @@ static void learn_step(ferti_sys_t *s, uint16_t ec, uint16_t ph)
           g = (g < (int32_t)(seed / 5U)) ? (int32_t)(seed / 5U) : (int32_t)(seed * 5U);
           L->gain[slot] = (uint32_t)g; learn_seed_sums(s, slot);
         }
-        L->gain[slot] = (uint32_t)g; s->strikes[slot] = 0; s->nr_exp[slot] = 0; s->unlearned[slot] = 0;
+        L->gain[slot] = (uint32_t)g; noresp_clear(s, slot); s->unlearned[slot] = 0;
         if (slot != 0U) { s->ph_alone = 0U; }
         learn_save(s);
         ev(s, "SYSTEM", "%s learn %s gain %lu->%lu (x1000/ml, shot %uml moved %ld%s, %ld/ml over %ld.%02ldml)",
@@ -1198,6 +1256,32 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       else if (need_ph < 0) { ml_ph = -need_ph / (int32_t)L->gain[1]; if (ml_ph > (int32_t)p->acid_ml) { ml_ph = (int32_t)p->acid_ml; } }
     }
 
+    if (s->phhold) { need_ph = 0; ml_ph = 0; }                           /* pH loop held by a no-response fault: EC only */
+
+    /* confirmation shot (2026-11-26, see learn_step): the run of no-response shots reached the trip count
+     * while the tank held. The next shot of that pump is enlarged to what should move the tank by
+     * STRIKE_MIN_* (within the per-cycle cap) and, for pH, goes without the A/B pair so that it is judged. */
+    uint8_t confirm_ec = 0U, confirm_ph = 0U;
+    if (s->confirm[0] && (ml_ab >= (int32_t)MIN_SHOT_AB_ML))
+    {
+      int32_t m = ((int32_t)STRIKE_MIN_EC * 1000L + (int32_t)L->gain[0] - 1) / (int32_t)L->gain[0];
+      if (m > (int32_t)p->ec_ml) { m = (int32_t)p->ec_ml; }
+      if (m > ml_ab) { ml_ab = m; }
+      confirm_ec = 1U;
+    }
+    if (ml_ph >= (int32_t)MIN_SHOT_PH_ML)
+    {
+      uint8_t slot = (need_ph > 0) ? 2U : 1U;
+      if (s->confirm[slot])
+      {
+        int32_t capc = (need_ph > 0) ? (int32_t)p->base_ml : (int32_t)p->acid_ml;
+        int32_t m    = ((int32_t)STRIKE_MIN_PH * 1000L + (int32_t)L->gain[slot] - 1) / (int32_t)L->gain[slot];
+        if (m > capc) { m = capc; }
+        if (m > ml_ph) { ml_ph = m; }
+        ml_ab = 0; confirm_ec = 0U; confirm_ph = 1U;       /* alone: A/B waits one cycle */
+      }
+    }
+
     /* pH check cycle (2026-11-17, review): a pH shot that goes out together with an A/B pair is never
      * judged (the stock moves pH too), so while EC needed feeding every cycle a dead pH pump or probe was
      * never noticed. Once PH_RIDE_MAX pH shots in a row went unjudged, the A/B pair waits one full mix
@@ -1215,7 +1299,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       { ml_ab = 0; ph_check = 1U; s->ph_alone++; }
     }
 
-    s->last.kind = K_IDLE; s->last.ec0 = ec; s->last.ph0 = ph; s->last.flow0 = meter_read(s); s->last.dil = 0; s->last.ph_ml = 0U;
+    s->last.kind = K_IDLE; s->last.ec0 = ec; s->last.ph0 = ph; s->last.flow0 = meter_read(s); s->last.dil = 0; s->last.ph_ml = 0U; s->last.confirm = 0U;
 
     if (ml_ab >= (int32_t)MIN_SHOT_AB_ML)
     {
@@ -1227,6 +1311,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       (void)shot_queue(s, P_A, (uint16_t)ml_ab, "auto", "ec-need");
       (void)shot_queue(s, P_B, (uint16_t)ml_ab, "auto", "ec-need");
       s->last.kind = K_EC; s->last.slot = 0U; s->last.ml = (uint16_t)ml_ab; s->ff_ec = 0; s->tu_carry = 0;
+      s->last.confirm = confirm_ec;
       s->ph_alone = 0U;
     }
     if (ml_ph >= (int32_t)MIN_SHOT_PH_ML)                                 /* 2026-09-20: pH no longer waits for an A/B-free cycle */
@@ -1234,7 +1319,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       uint8_t  pump = (need_ph > 0) ? P_BASE : P_ACID;
       uint8_t  slot = (need_ph > 0) ? 2U : 1U;
       int32_t  capc = (need_ph > 0) ? (int32_t)p->base_ml : (int32_t)p->acid_ml;
-      const char *why = ph_check ? "ph-need check (A/B waits one cycle)" : "ph-need";
+      const char *why = confirm_ph ? "ph-need confirm (A/B waits one cycle)" : (ph_check ? "ph-need check (A/B waits one cycle)" : "ph-need");
       if ((s->last.kind != K_EC) && (s->unlearned[slot] >= PROBE_AFTER))   /* probe: the smallest shot the learner accepts */
       {
         int32_t probe = ((int32_t)LEARN_MIN_PH * 1000L + (int32_t)L->gain[slot] - 1) / (int32_t)L->gain[slot];
@@ -1246,7 +1331,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
         ml_ph = (int32_t)fit;                                             /* trimmed to the cap's room, never below the minimum */
         (void)shot_queue(s, pump, (uint16_t)ml_ph, "auto", why);
         if (s->last.kind == K_EC) { s->last.ph_ml = (uint16_t)ml_ph; s->last.ph_slot = slot; }   /* rides behind A/B: drift books only */
-        else { s->last.kind = K_PH; s->last.slot = slot; s->last.ml = (uint16_t)ml_ph; }           /* alone: the learnable shot */
+        else { s->last.kind = K_PH; s->last.slot = slot; s->last.ml = (uint16_t)ml_ph; s->last.confirm = confirm_ph; }   /* alone: the learnable shot */
         s->ff_ph = 0;
       }
     }
@@ -1816,7 +1901,7 @@ const char *ferti_hb(ferti_sys_t *s)
                  pump_name(s, (uint8_t)s->run), (unsigned long)((s->run_ms + 999U) / 1000U),
                  (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), ph); }
   else
-  { n = snprintf(b, cap, "%s%s%s A%lu/B%lu/%s", mode_name(s->mode), s->flowhold ? "!flow" : "", s->caphold ? "!cap" : "",
+  { n = snprintf(b, cap, "%s%s%s%s A%lu/B%lu/%s", mode_name(s->mode), s->flowhold ? "!flow" : "", s->caphold ? "!cap" : "", s->phhold ? "!ph" : "",
                  (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), ph); }
   if ((s->tstate != T_NONE) && (n > 0) && ((size_t)n < cap))
   {
@@ -1919,9 +2004,10 @@ static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *
     /* the 24 h record is NOT cleared here any more (2026-11-17): re-arming after a tube-out / empty-stock
      * hold handed out a second full allowance. `dose cap clear` is the explicit override. */
     if (s->off_al) { s->off_al = 0U; dose_alarm(s, AL_OFF, 0U); }
+    if (s->phhold) { s->phhold = 0U; dose_alarm(s, AL_PHHOLD, 0U); }
     s->wait_s = 0; s->ff_ph = 0; s->ff_ec = 0; s->last.kind = K_IDLE; s->confound = 1U;
     s->acc_dph = 0; s->acc_dec = 0; s->acc_dose_ph = 0; s->acc_dose_ec = 0; s->acc_t = 0;
-    memset(s->strikes, 0, sizeof(s->strikes)); memset(s->nr_exp, 0, sizeof(s->nr_exp)); s->ph_alone = 0U;
+    noresp_clear(s, 3U); s->ph_alone = 0U;
     s->mode = M_AUTO;
     cfg_save(s);                             /* boot mode rides the cfg since 2026-09-02 */
     evs("CONFIG", src, "%s auto (ec %u±%u ph %u±%u shots %u/%u/%uml mix %lus)", tag,
@@ -2048,7 +2134,7 @@ static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *
       uint32_t seed = (slot <= 2U) ? s->seed_gain[slot] : 1U;
       if ((slot > 2U) || (v < seed / 5UL) || (v > seed * 5UL))
       { snprintf(out, cap, "dose learn ab|acid|base <x1000/ml> (within 1/5..5x of seed) | reset"); return 1; }
-      s->L.gain[slot] = (uint32_t)v; learn_seed_sums(s, slot); s->strikes[slot] = 0; s->nr_exp[slot] = 0; learn_save(s);
+      s->L.gain[slot] = (uint32_t)v; learn_seed_sums(s, slot); noresp_clear(s, slot); learn_save(s);
       evs("CONFIG", src, "%s learn %s gain set %lu", tag, t2, (unsigned long)v);
     }
     snprintf(out, cap, "%s learn: gain(x1000/ml) ab=%lu acid=%lu base=%lu (over %ld/%ld/%ldml) drift(x1000/h) ph=%ld ec=%ld ff ph=%ld ec=%ld strikes=%u/%u/%u unlearned=%u/%u last=%u wait=%lus win=%lumin ph%+ld ec%+ld topup=%s owed=%lduS fill=%u.%uL tank=%uL avg ec=%u ph=%u",
@@ -2194,9 +2280,9 @@ static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *
 
   {
     int n = snprintf(out, cap,
-             "%s %s%s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u phdir=%s 24h A%lu/B%lu/ac%lu/bs%luml cap=%u/%u/%u%s shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
+             "%s %s%s%s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u phdir=%s 24h A%lu/B%lu/ac%lu/bs%luml cap=%u/%u/%u%s shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
              (s->idx == 0U) ? "dose" : tag,
-             mode_name(s->mode), s->flowhold ? "(FLOWHOLD)" : "", s->hold ? "(HOLD)" : "",
+             mode_name(s->mode), s->flowhold ? "(FLOWHOLD)" : "", s->hold ? "(HOLD)" : "", s->phhold ? "(PH-HELD)" : "",
              (s->run >= 0) ? " run:" : "", (s->run >= 0) ? pump_name(s, (uint8_t)s->run) : "",
              (unsigned)s->ec, (p->ec_src == 0U) ? "avg" : ((p->ec_src == 1U) ? "1" : "2"), (unsigned)p->ec_div,
              (unsigned)s->ph,

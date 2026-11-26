@@ -157,7 +157,8 @@ typedef struct {
   struct { uint8_t pump; uint16_t ml; } q[FERTI_QLEN]; uint8_t qn;
   uint16_t ml_h[FERTI_CAP_HOURS][FERTI_PUMPS]; uint8_t hi; uint32_t hour_s;
   uint8_t  caphold;
-  uint8_t  al_pend[FERTI_PUMPS + 1U];
+  uint8_t  al_pend[FERTI_PUMPS + 2U];
+  uint8_t  phhold;                   /* pH loop held by a no-response fault: 0 none, 1 acid, 2 base (RAM only; `dose auto` re-arms) */
   uint8_t  off_al; char off_reason[40];
   uint32_t wait_s, bad_s;
   uint8_t  faulted, flowhold;
@@ -168,6 +169,8 @@ typedef struct {
   uint8_t  ph_src_bad, ec_src_bad;   /* latched: probes disagree */
   uint8_t  strikes[3], unlearned[3];
   int32_t  nr_exp[3];                /* expected movement (x1000) of the consecutive no-response shots per slot */
+  int32_t  nr_mov[3];                /* what the tank really did over that run (x1000, + = the pump's own direction) */
+  uint8_t  confirm[3];               /* the run reached the trip count while the tank held: the next shot is the confirmation */
   uint8_t  ph_alone;                 /* consecutive cycles the A/B pair was deferred so a pH shot could be judged alone */
   struct ferti_gate { uint16_t tr, cand, n; uint8_t oor, ok_n; } g_ec, g_ph;   /* plausibility + jump gate per channel */
   uint16_t ec_raw, ph_raw; uint8_t wq_bad_n;   /* ungated readings and how many 5 s samples in a row they were unsafe to irrigate with */
@@ -178,7 +181,7 @@ typedef struct {
   uint16_t tu_pred_dl; int32_t tu_ep_dil; uint16_t tu_ec0; int32_t tu_carry;
   uint32_t vmeter_dl;                /* virtual meter for systems without a pulse meter: batch refills / `topup` add here */
   int32_t  ff_ph, ff_ec;
-  struct { uint8_t kind, slot; uint16_t ml, ec0, ph0; uint32_t flow0; int32_t dil; uint8_t ph_slot; uint16_t ph_ml; } last;
+  struct { uint8_t kind, slot; uint16_t ml, ec0, ph0; uint32_t flow0; int32_t dil; uint8_t ph_slot; uint16_t ph_ml; uint8_t confirm; } last;
   uint8_t  confound;
   int32_t  acc_dph, acc_dec, acc_dose_ph, acc_dose_ec; uint32_t acc_t;
   uint8_t  evl;                      /* 500 ms ticks toward the 5 s evaluation */
