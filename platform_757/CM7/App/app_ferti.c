@@ -789,6 +789,21 @@ static void caps_release_poll(ferti_sys_t *s)       /* every 5 s in auto: the ol
   }
 }
 
+/* pH shot size for a need (fine units, > 0) at this pump's gain. 2026-11-26 (Lite RDWC tank): the size used to be
+ * floored and a shot below MIN_SHOT_PH_ML was dropped, so with a strong stock (2 ml = 0.074 pH against a 0.05 band)
+ * nothing went out until the error had grown to a whole minimum shot - the tank sat in the lower half of the band
+ * and dipped below it between decisions. Now the size is rounded to the nearest ml, and a need of at least half a
+ * minimum shot fires the minimum shot, provided the overshoot it causes stays inside the deadband (so two
+ * opposite pumps can never chase each other). */
+static int32_t ph_shot_ml(int32_t need, uint32_t gain, int32_t cap_ml, uint32_t db)
+{
+  int32_t g = (int32_t)gain, ml = (need + g / 2) / g;
+  int32_t mn = (int32_t)MIN_SHOT_PH_ML * g;
+  if ((ml < (int32_t)MIN_SHOT_PH_ML) && (2 * need >= mn) && ((mn - need) <= (int32_t)(db * 1000U))) { ml = (int32_t)MIN_SHOT_PH_ML; }
+  if (ml > cap_ml) { ml = cap_ml; }
+  return ml;
+}
+
 static void dose_off_fault(ferti_sys_t *s, const char *reason)   /* a fault dropped auto to OFF: persist + alarm the phone */
 {
   s->mode = M_OFF; cfg_save(s);
@@ -1270,8 +1285,8 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
       if (((p->ph_dir == 1U) && (need_ph < 0)) || ((p->ph_dir == 2U) && (need_ph > 0))) { need_ph = 0; }
       if ((err_ph >= -(int32_t)p->ph_db) && (err_ph <= (int32_t)p->ph_db) &&
           (((need_ph < 0) && (L->drift_ph < 0)) || ((need_ph > 0) && (L->drift_ph > 0)))) { need_ph = 0; }
-      if (need_ph > 0)      { ml_ph = need_ph / (int32_t)L->gain[2];  if (ml_ph > (int32_t)p->base_ml) { ml_ph = (int32_t)p->base_ml; } }
-      else if (need_ph < 0) { ml_ph = -need_ph / (int32_t)L->gain[1]; if (ml_ph > (int32_t)p->acid_ml) { ml_ph = (int32_t)p->acid_ml; } }
+      if (need_ph > 0)      { ml_ph = ph_shot_ml(need_ph, L->gain[2], (int32_t)p->base_ml, p->ph_db); }
+      else if (need_ph < 0) { ml_ph = ph_shot_ml(-need_ph, L->gain[1], (int32_t)p->acid_ml, p->ph_db); }
     }
 
     if (s->phhold) { need_ph = 0; ml_ph = 0; }                           /* pH loop held by a no-response fault: EC only */
