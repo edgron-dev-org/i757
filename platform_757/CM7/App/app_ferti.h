@@ -157,8 +157,9 @@ typedef struct {
   struct { uint8_t pump; uint16_t ml; } q[FERTI_QLEN]; uint8_t qn;
   uint16_t ml_h[FERTI_CAP_HOURS][FERTI_PUMPS]; uint8_t hi; uint32_t hour_s;
   uint8_t  caphold;
-  uint8_t  al_pend[FERTI_PUMPS + 2U];
+  uint8_t  al_pend[FERTI_PUMPS + 3U];
   uint8_t  phhold;                   /* pH loop held by a no-response fault: 0 none, 1 acid, 2 base (RAM only; `dose auto` re-arms) */
+  uint8_t  echold;                   /* EC loop held: the A/B pair did not respond (RAM only; `dose auto` re-arms) */
   uint8_t  off_al; char off_reason[40];
   uint32_t wait_s, bad_s;
   uint8_t  faulted, flowhold;

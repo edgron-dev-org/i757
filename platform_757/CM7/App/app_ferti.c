@@ -17,8 +17,8 @@
  *   - GAIN per pump (response per ml: A+B -> uS/cm, acid/base -> pH) is LEARNED from every
  *     auto shot: delta over the cycle minus the expected drift, as a forgetting sum-ratio,
  *     clamped to [1/5, 5x] of the kind's seed so a stuck probe can never teach a runaway;
- *     three consecutive "no response" shots -> FAULT, auto off (empty bottle, tube off,
- *     dead probe all land here);
+ *     three consecutive "no response" shots -> FAULT, that loop is held (EC or pH; the other one
+ *     keeps running; empty bottle, tube off, dead probe all land here);
  *   - DRIFT per variable (pH/h, uS/h: fertilizer acidity, plant uptake, CO2) is learned
  *     from idle cycles (no shot, no top-up), smoothed and clamped;
  *   - each decision: need = (target - value) + carried feed-forward (drift x cycle, so the
@@ -122,7 +122,7 @@ extern lfs_t *app_lfs(void);
 #define DRIFT_WIN_S        10800U   /* drift is learned over 3 h windows */
 #define MIN_SHOT_PH_ML     2U       /* smallest auto shot -> ripple floor */
 #define MIN_SHOT_AB_ML     15U
-#define NORESP_STRIKES     3U       /* consecutive no-response shots -> FAULT, auto off */
+#define NORESP_STRIKES     3U       /* consecutive no-response shots -> FAULT, that loop held */
 /* ---- 2026-11-17 review batch (each ruling is exercised by the host bench in test/host_ferti) ---- */
 #define STRIKE_SUM_MULT    2        /* ... and together they should have moved the tank 2 x STRIKE_MIN_* */
 /* ---- 2026-11-26: a held tank is not a dead pump (bench: acid-tank, dead-base-drift, dead-base-quiet) ---- */
@@ -170,6 +170,7 @@ extern lfs_t *app_lfs(void);
 #define M_RELEASE          FERTI_M_RELEASE
 #define AL_OFF             PUMPS
 #define AL_PHHOLD          (PUMPS + 1U)   /* "al.dose[.<name>].ph.hold": pH loop held, a pH pump did not respond */
+#define AL_ECHOLD          (PUMPS + 2U)   /* "al.dose[.<name>].ec.hold": EC loop held, the A/B pair did not respond */
 #define K_IDLE 0U
 #define K_EC   1U
 #define K_PH   2U
@@ -806,6 +807,14 @@ static void dose_ph_hold_fault(ferti_sys_t *s, uint8_t slot)
   dose_alarm(s, AL_PHHOLD, 1U);
 }
 
+/* Same for the A/B pair (2026-11-26, later the same day): no response holds the EC loop only, the pH loop
+ * keeps the tank where it is. Top-up compensation shots are A/B too and wait with it. */
+static void dose_ec_hold_fault(ferti_sys_t *s)
+{
+  s->echold = 1U;
+  dose_alarm(s, AL_ECHOLD, 1U);
+}
+
 /* alarm ids: first instance "al.dose.<slot>.cap" / "al.dose.off", src "dose" (unchanged);
  * others "al.dose.<name>.<slot>.cap" / "al.dose.<name>.off", src "dose.<name>" */
 static void alarm_id(const ferti_sys_t *s, char *b, size_t cap, const char *leaf)
@@ -817,7 +826,7 @@ static void alarm_id(const ferti_sys_t *s, char *b, size_t cap, const char *leaf
 /* one attempt per 5 s tick per pending slot; the uplink slot is shared with the datalog mirror */
 static void flush_events(ferti_sys_t *s)
 {
-  for (uint8_t k = 0; k <= AL_PHHOLD; k++)
+  for (uint8_t k = 0; k <= AL_ECHOLD; k++)
   {
     char js[320], id[40], leaf[24];
     int  n;
@@ -836,6 +845,15 @@ static void flush_events(ferti_sys_t *s)
                    cap_name(s, k), (unsigned)s->p.cap_ml[k],
                    active ? "reached - loop held. CHECK: tube still in tank, stock bottle not empty, pump drawing" : "released",
                    (unsigned long)used, (unsigned long)used);
+    }
+    else if (k == AL_ECHOLD)
+    {
+      alarm_id(s, id, sizeof id, "ec.hold");
+      n = snprintf(js, sizeof js,
+                   "{\"pv\":1,\"ts\":%lu,\"id\":\"%s\",\"src\":\"%s\",\"sev\":\"alarm\",\"state\":\"%s\","
+                   "\"msg\":\"Dosing EC loop %s\",\"val\":0}",
+                   (unsigned long)app_time_now(), id, s->evsrc, active ? "active" : "clear",
+                   active ? "HELD: A/B pumps no response, pH loop continues. CHECK: tubes in tank, stock not empty, pumps drawing" : "re-armed");
     }
     else if (k == AL_PHHOLD)
     {
@@ -1026,9 +1044,9 @@ static void learn_step(ferti_sys_t *s, uint16_t ec, uint16_t ph)
             ev(s, "FAULT", "%s %s: %u shots with no response (last %uml moved %ld) -> %s",
                s->tag, nm, (unsigned)s->strikes[slot], (unsigned)s->last.ml,
                (long)((s->last.kind == K_EC) ? d_ec : d_ph),
-               (slot == 0U) ? "auto off" : "pH loop held, EC loop continues (`dose auto` re-arms)");
+               (slot == 0U) ? "EC loop held, pH loop continues (`dose auto` re-arms)" : "pH loop held, EC loop continues (`dose auto` re-arms)");
             noresp_clear(s, slot);
-            if (slot == 0U) { char r[40]; snprintf(r, sizeof r, "AUTO OFF: %s pump no response", nm); dose_off_fault(s, r); }
+            if (slot == 0U) { dose_ec_hold_fault(s); }
             else { dose_ph_hold_fault(s, slot); }
           }
           else if (!s->confirm[slot])
@@ -1257,6 +1275,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
     }
 
     if (s->phhold) { need_ph = 0; ml_ph = 0; }                           /* pH loop held by a no-response fault: EC only */
+    if (s->echold) { need_ec = 0; ml_ab = 0; s->ff_ec = 0; }             /* EC loop held by a no-response fault: pH only */
 
     /* confirmation shot (2026-11-26, see learn_step): the run of no-response shots reached the trip count
      * while the tank held. The next shot of that pump is enlarged to what should move the tank by
@@ -1343,6 +1362,7 @@ static void chem_eval(ferti_sys_t *s)        /* every 5 s, auto mode, pumps idle
  * Gate = queue room, NOT an idle pump. Same sensor guard as the loop. */
 static int32_t topup_shot(ferti_sys_t *s, int32_t ml, const char *why)
 {
+  if (s->echold) { return 0; }                                           /* EC loop held: the debt stays owed */
   if ((ml < (int32_t)MIN_SHOT_AB_ML) || (s->qn > (uint8_t)(QLEN - 2U)) ||
       (s->ec == (uint16_t)SENS_INVAL) || (s->ec < EC_DRY_FLOOR)) { return 0; }
   if ((uint32_t)s->ec > (uint32_t)s->p.ec_target + s->p.ec_db) { return 0; }   /* already above the band: volume says "owed", the probe says no. The debt stays on the books and the loop decides once EC is back in range */
@@ -1901,7 +1921,7 @@ const char *ferti_hb(ferti_sys_t *s)
                  pump_name(s, (uint8_t)s->run), (unsigned long)((s->run_ms + 999U) / 1000U),
                  (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), ph); }
   else
-  { n = snprintf(b, cap, "%s%s%s%s A%lu/B%lu/%s", mode_name(s->mode), s->flowhold ? "!flow" : "", s->caphold ? "!cap" : "", s->phhold ? "!ph" : "",
+  { n = snprintf(b, cap, "%s%s%s%s%s A%lu/B%lu/%s", mode_name(s->mode), s->flowhold ? "!flow" : "", s->caphold ? "!cap" : "", s->phhold ? "!ph" : "", s->echold ? "!ec" : "",
                  (unsigned long)ml_24h(s, P_A), (unsigned long)ml_24h(s, P_B), ph); }
   if ((s->tstate != T_NONE) && (n > 0) && ((size_t)n < cap))
   {
@@ -2005,6 +2025,7 @@ static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *
      * hold handed out a second full allowance. `dose cap clear` is the explicit override. */
     if (s->off_al) { s->off_al = 0U; dose_alarm(s, AL_OFF, 0U); }
     if (s->phhold) { s->phhold = 0U; dose_alarm(s, AL_PHHOLD, 0U); }
+    if (s->echold) { s->echold = 0U; dose_alarm(s, AL_ECHOLD, 0U); }
     s->wait_s = 0; s->ff_ph = 0; s->ff_ec = 0; s->last.kind = K_IDLE; s->confound = 1U;
     s->acc_dph = 0; s->acc_dec = 0; s->acc_dose_ph = 0; s->acc_dose_ec = 0; s->acc_t = 0;
     noresp_clear(s, 3U); s->ph_alone = 0U;
@@ -2280,9 +2301,9 @@ static int ferti_cmd_body(ferti_sys_t *s, const char *a, const char *src, char *
 
   {
     int n = snprintf(out, cap,
-             "%s %s%s%s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u phdir=%s 24h A%lu/B%lu/ac%lu/bs%luml cap=%u/%u/%u%s shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
+             "%s %s%s%s%s%s%s%s ec=%u(src=%s div=%u) ph=%u(src=%s div=%u) tgt=%u±%u/%u±%u phdir=%s 24h A%lu/B%lu/ac%lu/bs%luml cap=%u/%u/%u%s shot=%u/%u/%u cal=%u/%u/%u/%u mix=%lum tank=%uL",
              (s->idx == 0U) ? "dose" : tag,
-             mode_name(s->mode), s->flowhold ? "(FLOWHOLD)" : "", s->hold ? "(HOLD)" : "", s->phhold ? "(PH-HELD)" : "",
+             mode_name(s->mode), s->flowhold ? "(FLOWHOLD)" : "", s->hold ? "(HOLD)" : "", s->phhold ? "(PH-HELD)" : "", s->echold ? "(EC-HELD)" : "",
              (s->run >= 0) ? " run:" : "", (s->run >= 0) ? pump_name(s, (uint8_t)s->run) : "",
              (unsigned)s->ec, (p->ec_src == 0U) ? "avg" : ((p->ec_src == 1U) ? "1" : "2"), (unsigned)p->ec_div,
              (unsigned)s->ph,
