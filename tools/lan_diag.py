@@ -112,6 +112,8 @@ def netset(ip, mode, addrs):
     r = tx(ip, pdu)
     if r[0] == 0x10:
         print("accepted: %s" % ("static %s" % addrs[0] if mode else "DHCP"))
+        if not mode:
+            print("the DHCP server may hand out a different address: run without arguments to find the board")
         if mode and addrs[0] != ip:
             print("the board is moving to %s now" % addrs[0])
     elif r[1] == 1:
@@ -142,6 +144,13 @@ def dump(ip, addr, length):
 
 
 def main():
+    try:
+        run()
+    except OSError as e:
+        print("no answer (%s). A board on DHCP may have a new address: run without arguments to scan." % e)
+
+
+def run():
     a = sys.argv[1:]
     if not a:
         pre = own_prefix()
