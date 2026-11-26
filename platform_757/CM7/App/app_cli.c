@@ -47,6 +47,7 @@ static void cmd_help(void)
          "  mbcfg       show/set modbus ports (mbcfg 485a slave 9600 8N1 addr=1 | 485a off | tcp on)\n\r"
          "  mbpoll      one-shot master txn (mbpoll 485b 1 4 0 4 | mbpoll tcp <ip> 1 3 0 4)\n\r"
          "  netcfg      DHCP-timeout fallback IP: netcfg [<ip> <mask> <gw> [dns] | default]\n\r"
+         "  peek        RAM hex dump: peek <hex addr> [len] | peek lan on|off (Modbus TCP memory window)\n\r"
          "  dose        dosing pumps: dose a|b|acid|base|ab <ml> | stop|auto|off | cal|shot|ec|ph|mix|phsrc|phdiv\n\r"
          "  tasks       both cores: task list, stack headroom, heap (alias: ps)\n\r"
          "  pio         process-image scanner: pio setup [port addr] | dump | do <pt> <ch> <0|1> | hr <pt> <ch> <v>\n\r"
@@ -176,6 +177,7 @@ static void cli_exec(char *line)
   { extern int app_usbfw_cli(char *l); if (app_usbfw_cli(line)) { return; } }   /* fwchunk + ota-/mota-/broker- passthrough (USB no-network OTA, app_usb_fw.c) */
   { extern int app_mbcfg_cli(char *l); if (app_mbcfg_cli(line)) { return; } }   /* mbcfg/mbpoll (Universal_Modbus_Port_Config.md) */
   { extern int app_netcfg_cli(char *l); if (app_netcfg_cli(line)) { return; } }   /* netcfg: static-fallback IP (littlefs net.cfg) */
+  { extern int app_peek_cli(char *l); if (app_peek_cli(line)) { return; } }       /* peek: RAM hex dump / LAN memory window switch (app_peek.c) */
   { extern int app_diag_cli(char *l); if (app_diag_cli(line)) { return; } }     /* tasks / ps: both cores' stacks + heap */
   { extern int app_pio_cli(char *l); if (app_pio_cli(line)) { return; } }       /* pio: process-image scanner bench (Process_Image_and_IO_Mapping.md) */
   { extern int app_pf_cli(char *l); if (app_pf_cli(line)) { return; } }         /* pfstat/pftest/pfreport (power-fail three-layer API) */

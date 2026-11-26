@@ -200,6 +200,29 @@ static void mqtt_dhcp_bound_check(void)     /* defaultTask each tick: leave fall
     tcpip_callback(mqtt_force_reconnect_cb, NULL);   /* source address changed, rebuild the MQTT connection */
   }
 }
+/* snapshot for the LAN diagnostic block (app_peek.c, Modbus TCP input registers 0x3000..): plain scalars
+ * read from defaultTask. The block exists so that a board which cannot reach its broker can still say why. */
+#include "app_peek.h"
+static volatile uint32_t s_diag_broker_ip = 0;      /* host order: where the last connect attempt went */
+static volatile uint16_t s_diag_broker_port = 0;
+static volatile uint32_t s_diag_offline_ticks = 0;  /* 500 ms ticks without the broker (mirror of the heal-ladder clock) */
+void app_mqtt_netdiag(app_netdiag_t *d)
+{
+  uint32_t age = app_ethdiag_rx_age_s();
+  d->flags       = (uint16_t)((s_mqtt_up ? 0x08U : 0U) | (s_cloud_was_up ? 0x10U : 0U));
+  d->fallback    = s_ip_fallback;
+  d->broker_id   = s_broker;
+  d->broker_ip   = s_diag_broker_ip;
+  d->broker_port = s_diag_broker_port;
+  d->conn_state  = (s_mqtt != NULL) ? (uint16_t)s_mqtt->conn_state : 0xFFFFU;
+  d->conn_err    = (int16_t)s_diag_conn_err;
+  d->conn_fails  = s_conn_fails;
+  d->offline_s   = s_diag_offline_ticks / 2U;
+  d->mute_resets = s_pf_mute_resets;
+  d->pub_ok      = s_mqtt_pub_ok;
+  d->rx_age_s    = (age > 0xFFFFU) ? 0xFFFFU : (uint16_t)age;
+}
+
 /* AWS domain-name resolution callback (tcpip thread) */
 static void aws_dns_found(const char *name, const ip_addr_t *ipaddr, void *arg)
 {
@@ -252,7 +275,7 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
           (strncmp(s_cmd_buf, "vent", 4) == 0) || (strncmp(s_cmd_buf, "netcfg", 6) == 0) ||
           (strncmp(s_cmd_buf, "dose", 4) == 0) || (strncmp(s_cmd_buf, "pulse", 5) == 0) ||
           (strncmp(s_cmd_buf, "hsdi ", 5) == 0) || (strncmp(s_cmd_buf, "flow", 4) == 0) ||
-          (strncmp(s_cmd_buf, "aer", 3) == 0))
+          (strncmp(s_cmd_buf, "aer", 3) == 0) || (strncmp(s_cmd_buf, "peek", 4) == 0))
       {
         extern volatile uint8_t s_mbreg_pend;
         extern char s_mbreg_cmd[160];
@@ -587,6 +610,7 @@ static void mqtt_connect_cb(void *arg)  /* tcpip thread */
   if (s_mqtt == NULL) { s_mqtt = mqtt_client_new(); }
   if (s_mqtt != NULL && !mqtt_client_is_connected(s_mqtt))
   {
+    s_diag_broker_ip = lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&broker))); s_diag_broker_port = port;
     err_t ce = mqtt_client_connect(s_mqtt, &broker, port, mqtt_connection_cb, NULL, &ci);
     if (ce != ERR_OK)
     {
@@ -990,6 +1014,16 @@ void mqtt_app_task(void)
         if (!app_pulse_cmd(s_mbreg_cmd, "cloud", s_mbreg_result, sizeof(s_mbreg_result)))
         { (void)app_hsdi_cmd(s_mbreg_cmd, "cloud", s_mbreg_result, sizeof(s_mbreg_result)); }
       }
+      else if (strncmp(s_mbreg_cmd, "peek", 4) == 0)
+      {
+        extern int app_peek_cmd(const char *line, char *out, uint16_t cap);
+        if (!app_peek_cmd(s_mbreg_cmd, s_mbreg_result, sizeof(s_mbreg_result))) { snprintf(s_mbreg_result, sizeof(s_mbreg_result), "peek: bad command"); }
+        else if (strncmp(s_mbreg_cmd, "peek lan", 8) == 0)
+        {
+          extern void app_log_event_src(const char *type, const char *src, const char *fmt, ...);
+          app_log_event_src("CONFIG", "cloud", "%s -> %s", s_mbreg_cmd, s_mbreg_result);
+        }
+      }
       else if (strncmp(s_mbreg_cmd, "netcfg", 6) == 0)
       {
         (void)app_netcfg_cmd(s_mbreg_cmd, s_mbreg_result, sizeof(s_mbreg_result));
@@ -1175,6 +1209,7 @@ void mqtt_app_task(void)
       {
         s_offline_ticks = 0;
         s_offline_total = 0;
+        s_diag_offline_ticks = 0;
         s_mmc_tx_base = ETH->MMCTPCGR;   /* keep the MAC TX baseline fresh so autopsy #1's delta covers only offline time */
       }
       else if (++s_offline_ticks >= 240U)
@@ -1222,6 +1257,7 @@ void mqtt_app_task(void)
       if (!s_mqtt_up && ip_shown)
       {
         s_offline_total++;
+        s_diag_offline_ticks = s_offline_total;
         if ((s_offline_total % 720U) == 0U)   /* rung 2 every 6 min: re-announce ourselves */
         {
           printf("[MQTT] heal rung2: gratuitous ARP + DHCP renew (offline %lus)\n\r",

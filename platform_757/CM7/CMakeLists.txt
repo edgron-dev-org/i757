@@ -91,6 +91,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app_mbport.c                              # P2②: M7-side Modbus client (delivers to CM4 via RPMsg)
     App/app_mbcfg.c                               # generic Modbus port config (littlefs+op8+CLI/cloud, 2026-07-18)
     App/app_netcfg.c                              # static-fallback IP runtime config (littlefs net.cfg, 2026-08-31)
+    App/app_peek.c                                # field diagnostics without the cloud: `peek`, Modbus TCP 0x3000 network block + memory window (2026-11-27)
     App/app_pimage_cm7.c                          # process-image I/O scanner API (app_io_*, SRAM4 image, 2026-07-19)
     App/app_diag.c                                # 'tasks' CLI: both cores' stacks + heap (2026-07-19)
     App/app_ethdiag.c                             # Ethernet receive-path diagnostics for stat/heartbeat/status (2026-10-09)

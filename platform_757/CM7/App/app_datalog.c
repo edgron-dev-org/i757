@@ -486,8 +486,9 @@ static void dl_ev_drain(void)
 static void dl_win_reset(void)
 {
   const void *mods;
-  uint16_t nm = app_diag_mod_list(&mods);
-  uint16_t i;
+  uint16_t nm, i;
+  { extern int app_diag_mods_refresh(void); (void)app_diag_mods_refresh(); }   /* same task as the heartbeat builder; must not wait for the cloud */
+  nm = app_diag_mod_list(&mods);
   s_nslot = 0;
   for (i = 0; (i < nm) && (s_nslot < DL_MODS); i++)
   {

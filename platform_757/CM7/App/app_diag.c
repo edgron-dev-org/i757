@@ -669,18 +669,29 @@ uint8_t app_diag_di_changed(void)
   return changed;
 }
 
+/* Ask CM4 which backplane addresses answer and re-identify the modules when that set changed.
+ * 1 = the bitmap was read. Until 2026-11-27 this lived only inside the heartbeat builder, which runs
+ * only while the broker is connected: a board that rebooted with the cloud unreachable never learned
+ * its modules, so the on-board history had no module columns for the whole outage (greenhouse,
+ * 2026-11-26: 36 min of pH/EC missing after a self reset). The data recorder now calls it too. */
+int app_diag_mods_refresh(void)
+{
+  uint8_t req[1] = { 0x04U };
+  uint8_t rsp[16];
+  uint16_t r = app_rpc_transact(req, 1, rsp, sizeof(rsp), 120);
+  if (r < 11U) { return 0; }
+  uint16_t bitmap = (uint16_t)(rsp[0] | ((uint16_t)rsp[1] << 8));
+  if (bitmap != s_mods_bitmap) { mods_reident(bitmap); s_mods_bitmap = bitmap; }
+  return 1;
+}
+
 void app_diag_mtsk(char *out, uint16_t cap)   /* heartbeat: raw JSON fragment (may be "") */
 {
   if ((s_mtsk_ctr++ % 10U) == 0U)
   {
-    uint8_t req[1] = { 0x04U };
-    uint8_t rsp[16];
-    uint16_t r = app_rpc_transact(req, 1, rsp, sizeof(rsp), 120);
-    if (r >= 11U)
+    if (app_diag_mods_refresh())
     {
-      uint16_t bitmap = (uint16_t)(rsp[0] | ((uint16_t)rsp[1] << 8));
       uint16_t n = 0;
-      if (bitmap != s_mods_bitmap) { mods_reident(bitmap); s_mods_bitmap = bitmap; }
       s_mtsk[0] = 0;
       for (uint16_t i = 0; (i < s_nmods) && (n < sizeof(s_mtsk) - 48U); i++)
       {

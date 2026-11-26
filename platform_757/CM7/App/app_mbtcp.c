@@ -16,6 +16,7 @@
 #include "app_mbtcp.h"
 #include "app_mbcfg.h"
 #include "app_rpc.h"
+#include "app_peek.h"
 
 #define MBT_PORT       502U
 #define MBT_NCONN      2U      /* contract §5: 2 concurrent, reject the 3rd */
@@ -166,10 +167,16 @@ void app_mbtcp_service(void)
     mbt_conn_t *c = &s_c[i];
     if ((c->pcb == NULL) || (!c->pend) || (c->rsp_len != 0U)) { continue; }   /* rsp_len nonzero = send-back in flight */
     static uint8_t req[300], rsp[300];
-    req[0] = 0x09U;
-    memcpy(&req[1], c->pdu, c->pdu_len);
-    uint16_t r = app_rpc_transact(req, (uint16_t)(1U + c->pdu_len), rsp, sizeof(rsp), 150);
-    uint16_t pl;
+    uint16_t r, pl;
+    /* 0x3000..0x31FF = network diagnostics / memory window: CM7 state, answered here (app_peek.c) */
+    pl = app_peek_mbtcp(c->pdu, c->pdu_len, &rsp[1], (uint16_t)(sizeof(rsp) - 1U));
+    if (pl != 0U) { rsp[0] = 0U; r = (uint16_t)(pl + 1U); }
+    else
+    {
+      req[0] = 0x09U;
+      memcpy(&req[1], c->pdu, c->pdu_len);
+      r = app_rpc_transact(req, (uint16_t)(1U + c->pdu_len), rsp, sizeof(rsp), 150);
+    }
     if ((r >= 2U) && (rsp[0] == 0U))
     {
       pl = (uint16_t)(r - 1U);

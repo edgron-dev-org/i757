@@ -118,6 +118,45 @@ UART disabled (uart_close), DMA/interrupt released, DE pin set to receive.
 - The single source of slot data = the CM4 backplane scheduler (true read-back, no trust of shadows); the serial slave / TCP slave / cloud point all share the same source.
 - In-flight write semantics: writing a coil/mask is immediately turned into a backplane FC15 (within hundreds of ms), the read-back cache refreshes on the next backplane poll — **reading a stale value ≤5s is contract-defined behavior** (consistent with the cloud `m2.do` read-back semantics).
 
+### 4.5 Network Diagnostic Block and Memory Window (**Modbus TCP only**, answered by CM7) [added 2026-11-27]
+
+Why: a board can run its control loops and be reachable on the LAN while it cannot reach its broker (for example a second DHCP server on the site handed it a gateway that leads nowhere). The cloud command channel is then the very thing that is down, and the console needs someone on site. This section is the diagnostic view that does not depend on the cloud. Implementation = `app_peek.c`. Serial slave ports do not serve it.
+
+**Input registers 0x3000~0x301F: network diagnostic block (FC04, always on, nothing secret).** Reading the block in one request gives one consistent snapshot. 32-bit values are high word first; an IP address reads as a 32-bit number in network order (0xC0A80164 = 192.168.1.100).
+
+| Address | Meaning |
+|---|---|
+| 0x3000 | DIAG_VER = 1 |
+| 0x3001 | FLAGS: bit0 = Ethernet link, bit1 = DHCP lease held, bit2 = static fallback address in use, bit3 = broker connected, bit4 = broker reached since power-up, bit5 = memory window enabled |
+| 0x3002/3 | Own IP |
+| 0x3004/5 | Netmask |
+| 0x3006/7 | **Gateway** |
+| 0x3008/9 | DNS |
+| 0x300A/B | **DHCP server that gave the lease** (0 = no lease) |
+| 0x300C/D | Broker IP of the last connect attempt |
+| 0x300E | Broker port |
+| 0x300F | Broker index (numbering in app_cfg.h) |
+| 0x3010 | MQTT client state: 0 idle, 1 TCP connecting, 2 MQTT connecting, 3 connected, 4 disconnecting; 0xFFFF = no client yet |
+| 0x3011 | Last immediate connect error (lwIP err_t, signed) |
+| 0x3012 | Consecutive connect failures |
+| 0x3013/4 | Seconds without the broker (the heal-ladder clock) |
+| 0x3015 | Self resets in this offline episode |
+| 0x3016/7 | Publishes acknowledged since boot |
+| 0x3018 | Seconds since the last Ethernet frame was received (capped at 65535) |
+| 0x3019~0x301F | Reserved |
+
+**Memory window (off by default).** Modbus TCP has no authentication, so this view must first be enabled with `peek lan on` over the cloud command channel or the console (stored in littlefs `peek.cfg`, survives a reboot; `peek lan off` disables). While it is off, every address below answers exception 02.
+
+| Address | Meaning |
+|---|---|
+| Holding registers 0x3100/0x3101 | Window start address, high/low word (FC06 one at a time, or FC16 both; FC03 reads back) |
+| Input registers 0x3100~0x3177 | Window contents, 120 registers = 240 bytes, **in memory order**: the high byte of a register is the byte at the lower address |
+
+- Only RAM can be read (DTCM 0x20000000/128K, AXI 0x24000000/512K, SRAM1~3 0x30000000/288K, SRAM4 0x38000000/64K, backup SRAM 0x38800000/4K) plus the Cortex-M system control block 0xE000ED00~0xE000ED3F (fault status / address registers). Anything else answers exception 02.
+- **Not served**: flash (on boards without a secure element the image carries the device credentials), peripheral registers (some clear on read; an unmapped address is a bus fault, i.e. a reset), the TLS memory pool (session keys).
+- Leave it off on any network you do not control.
+- No clash with the holding-register range 0x3000~0x30FF reserved in §4.2 (port configuration): the diagnostic block is in the input-register table, the window address registers start at 0x3100.
+
 ## 5. Modbus TCP (CM7, LwIP)
 
 | Item | Convention |
@@ -164,3 +203,4 @@ UART disabled (uart_close), DMA/interrupt released, DE pin set to receive.
 - **Six-port shared-bus stress test**: 485D/E/F passed on first try; 9600×1800 transactions + 115200×3000 transactions **zero failures** (latency 9600=32ms steady / 115200=6ms); board-side ledger = each of the six ports received ~93KB/~9100 frames (**every frame received by all 6 ports** — eavesdropping immunity, each frame tested 6 times) **ovr=0 err=0 all zero**, ring ledger wr==rd balanced; concurrently the backplane scheduler had 10855 polls with 0 failures, cloud heartbeat uninterrupted — proving the CM4 1ms main loop handles 6×485 + backplane + RPMsg concurrently. Hot line-parameter change (9600→115200, six-port uart_set_line) validated in practice ✓.
 - **Script ② closed the same day (after wiring)**: 485A↔485B **bidirectional** answer test all passed (two isolated ports, hardware DE / GPIO-DE each tested as master and slave in turn). One issue cracked along the way: **same-board self-query-self-answer deadlock** — the master transaction spun waiting inside the RPMsg callback, hogging the CM4 main loop, so the slave-port service couldn't run (ring ledger evidence fw=1/rd=0 = the response was framed but nobody consumed it); fix = the master wait loop pumps `mbfront_service()` on its behalf (single-threaded sequential call, no re-entrancy). **Affects only same-board two-port cross-testing; the external-device scenario has no such landmine.** The port statistics op0B was expanded to 40B (adds the ring ledger internals wr/rd/fs/f_wr/f_rd, a resident troubleshooting instrument).
 - v0.2 (2026-11-09): §3.2 front-port master timing (default scan timeout 20→60 ms; timeout and pre-request bus silence configurable per scan-table entry, `timeout_ms`/`gap_ms`), from a bench with a third-party T/RH transmitter and four soil probes on one 9600 bus (gap sweep 0/2/5/10/15/20/30/50/100 ms, 100 polls each).
+- v0.3 (2026-11-27): §4.5 network diagnostic block (input registers from 0x3000, always on) and memory window (from 0x3100, off by default, enabled with `peek lan on`), Modbus TCP only.

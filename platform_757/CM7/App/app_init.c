@@ -250,6 +250,9 @@ void app_tls_init(void)   /* called once after app_periph_init (start of mqtt_ap
   mbedtls_memory_buffer_alloc_init(s_tls_pool, sizeof(s_tls_pool));
 }
 
+/* where the TLS pool lives: the LAN memory window (app_peek.c) keeps off it (session keys) */
+void app_tls_pool_region(uintptr_t *base, size_t *len) { *base = (uintptr_t)s_tls_pool; *len = sizeof(s_tls_pool); }
+
 /* pool usage (bytes) for field forensics — MBEDTLS_MEMORY_DEBUG counters */
 void app_tls_pool_usage(size_t *cur, size_t *maxu)
 {
