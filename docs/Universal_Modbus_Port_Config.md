@@ -127,7 +127,7 @@ Why: a board can run its control loops and be reachable on the LAN while it cann
 | Address | Meaning |
 |---|---|
 | 0x3000 | DIAG_VER = 1 |
-| 0x3001 | FLAGS: bit0 = Ethernet link, bit1 = DHCP lease held, bit2 = static fallback address in use, bit3 = broker connected, bit4 = broker reached since power-up, bit5 = memory window enabled |
+| 0x3001 | FLAGS: bit0 = Ethernet link, bit1 = DHCP lease held, bit2 = static fallback address in use, bit3 = broker connected, bit4 = broker reached since power-up, bit5 = memory window enabled, bit6 = static mode (`netcfg static`, DHCP not used) |
 | 0x3002/3 | Own IP |
 | 0x3004/5 | Netmask |
 | 0x3006/7 | **Gateway** |
@@ -155,7 +155,35 @@ Why: a board can run its control loops and be reachable on the LAN while it cann
 - Only RAM can be read (DTCM 0x20000000/128K, AXI 0x24000000/512K, SRAM1~3 0x30000000/288K, SRAM4 0x38000000/64K, backup SRAM 0x38800000/4K) plus the Cortex-M system control block 0xE000ED00~0xE000ED3F (fault status / address registers). Anything else answers exception 02.
 - **Not served**: flash (on boards without a secure element the image carries the device credentials), peripheral registers (some clear on read; an unmapped address is a bus fault, i.e. a reset), the TLS memory pool (session keys).
 - Leave it off on any network you do not control.
-- No clash with the holding-register range 0x3000~0x30FF reserved in §4.2 (port configuration): the diagnostic block is in the input-register table, the window address registers start at 0x3100.
+- No clash with the holding-register range 0x3000~0x30FF reserved in §4.2 (port configuration): the diagnostic block is in the input-register table, the window address registers start at 0x3100, the §4.6 settings block at 0x3200.
+
+### 4.6 Network Settings Block (**Modbus TCP only**, answered by CM7) [added 2026-11-27]
+
+Same field case as §4.5: a board holding a DHCP lease whose gateway leads nowhere cannot be sent the cloud command `netcfg`, and because DHCP "succeeded", the DHCP-timeout fallback address never comes into play. Two additions cover it: **static mode** (DHCP not used; `netcfg static`, see the Device-Cloud Protocol) and a **register block that sets the network parameters from the LAN**. Implementation = `app_netcfg.c`; it is the same configuration (littlefs `net.cfg`) and the same checks as the console / cloud command `netcfg`.
+
+**Holding registers 0x3200~0x3209** (FC03 read / FC06 write single / FC16 write multiple). 32-bit values high word first, IP encoding as in §4.5.
+
+| Address | Meaning |
+|---|---|
+| 0x3200 | MODE: 0 = DHCP (the addresses below are used only as the fallback when DHCP times out), 1 = static (DHCP not used) |
+| 0x3201/2 | IP |
+| 0x3203/4 | Netmask |
+| 0x3205/6 | Gateway |
+| 0x3207/8 | DNS (write 0 = use the gateway) |
+| 0x3209 | COMMIT: write **0xA55A** = check, store and apply at once; reads 1 while the staged values differ from the stored configuration (uncommitted change), 0 when they match |
+
+- **Two steps**: writes to 0x3200~0x3208 land in a staging copy and change nothing; only the COMMIT write checks, stores and applies them, so a half-written address is never used. One FC16 of 10 registers from 0x3200 (key in the last one) does it all in a single request.
+- **A configuration that fails the checks answers exception 03 and leaves the stored one untouched**: the netmask must be contiguous; the IP must not be the network or broadcast address; the gateway must be inside the IP's subnet and differ from the IP. A COMMIT value other than 0xA55A also answers 03.
+- **Applied at once**: the reply goes out first, then the address changes. If the IP changed, the connection drops; look for the board at its new address. On MODE 1 -> 0 the board keeps its current address until a lease arrives.
+- **When a write from the LAN is accepted** (Modbus TCP has no authentication, so not always):
+  1. the board has been **without its broker for 60 s** - the situation this exists for, when the authenticated channel is out of reach; or
+  2. the owner has declared the LAN trusted (`peek lan on`, the same switch as the memory window); or
+  3. the firmware is built without the cloud (`APP_ENABLE_CLOUD=0`): Modbus is then the only remote door and the site already trusts it.
+
+  Otherwise a write answers **exception 01** - while the board is online, use the cloud command `netcfg`. **Reads are always allowed** (the same information is in the §4.5 diagnostic block anyway).
+- A successful commit is recorded in the event journal as CONFIG (source `lan`).
+- **If you get it wrong**: the checks catch a self-contradicting configuration, not one that is consistent but belongs to a different network. A static address like that takes the board off both the LAN and the cloud, and the only way back is the USB console (`netcfg dhcp`). Read the §4.5 diagnostic block first and confirm the subnet.
+- Tool: `tools/lan_diag.py <board ip> static <ip> <mask> <gw> [dns]` / `... dhcp`.
 
 ## 5. Modbus TCP (CM7, LwIP)
 
@@ -203,4 +231,5 @@ Why: a board can run its control loops and be reachable on the LAN while it cann
 - **Six-port shared-bus stress test**: 485D/E/F passed on first try; 9600×1800 transactions + 115200×3000 transactions **zero failures** (latency 9600=32ms steady / 115200=6ms); board-side ledger = each of the six ports received ~93KB/~9100 frames (**every frame received by all 6 ports** — eavesdropping immunity, each frame tested 6 times) **ovr=0 err=0 all zero**, ring ledger wr==rd balanced; concurrently the backplane scheduler had 10855 polls with 0 failures, cloud heartbeat uninterrupted — proving the CM4 1ms main loop handles 6×485 + backplane + RPMsg concurrently. Hot line-parameter change (9600→115200, six-port uart_set_line) validated in practice ✓.
 - **Script ② closed the same day (after wiring)**: 485A↔485B **bidirectional** answer test all passed (two isolated ports, hardware DE / GPIO-DE each tested as master and slave in turn). One issue cracked along the way: **same-board self-query-self-answer deadlock** — the master transaction spun waiting inside the RPMsg callback, hogging the CM4 main loop, so the slave-port service couldn't run (ring ledger evidence fw=1/rd=0 = the response was framed but nobody consumed it); fix = the master wait loop pumps `mbfront_service()` on its behalf (single-threaded sequential call, no re-entrancy). **Affects only same-board two-port cross-testing; the external-device scenario has no such landmine.** The port statistics op0B was expanded to 40B (adds the ring ledger internals wr/rd/fs/f_wr/f_rd, a resident troubleshooting instrument).
 - v0.2 (2026-11-09): §3.2 front-port master timing (default scan timeout 20→60 ms; timeout and pre-request bus silence configurable per scan-table entry, `timeout_ms`/`gap_ms`), from a bench with a third-party T/RH transmitter and four soil probes on one 9600 bus (gap sweep 0/2/5/10/15/20/30/50/100 ms, 100 polls each).
+- v0.4 (2026-11-27): §4.6 network settings block (holding registers from 0x3200, two-step commit; LAN writes accepted only after 60 s without the broker, or with `peek lan on`, or on a cloud-less build) + static mode `netcfg static` / `netcfg dhcp`; §4.5 FLAGS gains bit6.
 - v0.3 (2026-11-27): §4.5 network diagnostic block (input registers from 0x3000, always on) and memory window (from 0x3100, off by default, enabled with `peek lan on`), Modbus TCP only.

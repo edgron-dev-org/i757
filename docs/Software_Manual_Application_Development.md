@@ -536,9 +536,13 @@ Once the buffer is full it stays at `cap-1` (output cut, memory safe).
 netcfg                                                 # show fallback config and the address actually in use
 netcfg 192.168.1.250 255.255.255.0 192.168.1.1         # set and persist (optional 4th arg = DNS, defaults to the gateway)
 netcfg default                                         # remove the file, back to compile-time defaults
+netcfg static 192.168.1.100 255.255.255.0 192.168.1.1  # static mode: DHCP not used, always these addresses (applied at once)
+netcfg dhcp                                            # back to DHCP; the stored addresses stay as the fallback
 ```
 
 Changing the value while stranded in fallback re-applies the address and reconnects immediately; the cloud uses the same syntax over `dn/cmd`, result in the heartbeat `cmdr` field. While in fallback the controller retries DHCP automatically every 60 s (and on a cable replug); as soon as a lease arrives it switches back to the dynamic address and reconnects (2026-08-31).
+
+**Static mode (added 2026-11-27)**: where a second DHCP server on the site hands out bad addresses, or the network offers no DHCP at all, pin the address with `netcfg static ...`. The values are checked before they are stored (contiguous netmask, IP not the network or broadcast address, gateway inside the IP's subnet); a failing set is refused and the old configuration stays. When the board cannot reach the cloud, the same settings can be written from the LAN over Modbus TCP (Universal Modbus Port Configuration §4.6, tool `tools/lan_diag.py`). Mind that a static address which does not belong to the site's network takes the board off both the LAN and the cloud; the way back is the USB console (`netcfg dhcp`).
 
 ### 5.9 Diagnostics over the USB console — is anything about to break?
 

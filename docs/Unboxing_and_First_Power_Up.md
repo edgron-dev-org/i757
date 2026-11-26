@@ -53,7 +53,7 @@ time: not synced yet
 Other commands worth knowing on day one (full list: type `help`; diagnostics: Software Manual §5.9):
 
 ```
-netcfg        show the DHCP-timeout fallback address (see §4.2) and the address actually in use
+netcfg        show the network settings (DHCP-timeout fallback address, see §4.2; or static mode) and the address actually in use
 tasks         both cores: task list, stack headroom, heap, last reset cause
 ota           bank / OTA state / trial flag
 mbus          backplane scheduler status: which module addresses are online

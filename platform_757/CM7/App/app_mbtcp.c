@@ -168,7 +168,7 @@ void app_mbtcp_service(void)
     if ((c->pcb == NULL) || (!c->pend) || (c->rsp_len != 0U)) { continue; }   /* rsp_len nonzero = send-back in flight */
     static uint8_t req[300], rsp[300];
     uint16_t r, pl;
-    /* 0x3000..0x31FF = network diagnostics / memory window: CM7 state, answered here (app_peek.c) */
+    /* 0x3000..0x32FF = network diagnostics / memory window / network settings: CM7 state, answered here (app_peek.c) */
     pl = app_peek_mbtcp(c->pdu, c->pdu_len, &rsp[1], (uint16_t)(sizeof(rsp) - 1U));
     if (pl != 0U) { rsp[0] = 0U; r = (uint16_t)(pl + 1U); }
     else

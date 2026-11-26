@@ -9,7 +9,7 @@
  * that was down, and the console needs someone on site. Finding the cause took an hour of packet
  * captures; one look at the gateway address would have settled it.
  *
- * Three read-only views, contract = docs/Universal_Modbus_Port_Config.md §4.4 and
+ * Three read-only views, contract = docs/Universal_Modbus_Port_Config.md §4.5 and
  * docs/Device_Cloud_Protocol.md (command `peek`):
  *   1. Network diagnostic block: Modbus TCP input registers 0x3000.. (always on, nothing secret):
  *      addresses the board is using, who gave them, link / DHCP / broker state, last connect error.
@@ -35,6 +35,8 @@
 #include "lwip/dhcp.h"
 #include "lwip/dns.h"
 #include "lwip/ip4_addr.h"
+#include "app_cfg.h"
+#include "app_netcfg.h"
 #include "app_peek.h"
 
 extern lfs_t *app_lfs(void);
@@ -181,7 +183,7 @@ static void diag_snapshot(void)
     d.flags = (uint16_t)((d.flags & 0x0018U) |
               (netif_is_link_up(&gnetif) ? 1U : 0U) |
               (((dh != NULL) && dhcp_supplied_address(&gnetif)) ? 2U : 0U) |
-              (d.fallback ? 4U : 0U) | (s_lan ? 0x20U : 0U));
+              (d.fallback ? 4U : 0U) | (s_lan ? 0x20U : 0U) | (app_netcfg_static() ? 0x40U : 0U));
   }
   s_d = d; s_ip = ip; s_gw = gw; s_mask = mask; s_dns = dnsa; s_srv = srv;
 }
@@ -192,7 +194,7 @@ static uint16_t diag_word(uint16_t i)        /* i = offset inside the diagnostic
   switch (i)
   {
     case 0:  return 1U;                              /* DIAG_VER */
-    case 1:  return d.flags;                         /* bit0 link, bit1 DHCP lease, bit2 static fallback, bit3 broker connected, bit4 broker reached this boot, bit5 LAN memory window on */
+    case 1:  return d.flags;                         /* bit0 link, bit1 DHCP lease, bit2 static fallback, bit3 broker connected, bit4 broker reached this boot, bit5 LAN memory window on, bit6 static mode */
     case 2:  return (uint16_t)(ip >> 16);    case 3:  return (uint16_t)ip;
     case 4:  return (uint16_t)(mask >> 16);  case 5:  return (uint16_t)mask;
     case 6:  return (uint16_t)(gw >> 16);    case 7:  return (uint16_t)gw;
@@ -214,7 +216,25 @@ static uint16_t diag_word(uint16_t i)        /* i = offset inside the diagnostic
 
 static uint16_t ex(uint8_t fc, uint8_t code, uint8_t *rsp) { rsp[0] = (uint8_t)(fc | 0x80U); rsp[1] = code; return 2U; }
 
-/* A Modbus TCP PDU aimed at 0x3000..0x31FF is answered here (CM7 owns this state; the rest of the
+/* May a PC on the LAN change the network settings right now? Modbus TCP has no authentication, so:
+ * only while the authenticated channel is out of reach (no broker for a minute - the case this
+ * exists for), or when the owner has declared the LAN trusted (`peek lan on`), or on a build with
+ * no cloud at all (then Modbus is the only remote door and the site already trusts it). */
+#define NC_OFFLINE_S   60U
+static int netcfg_wr_ok(void)
+{
+#if APP_ENABLE_CLOUD
+  app_netdiag_t d;
+  if (s_lan) { return 1; }
+  memset(&d, 0, sizeof d);
+  app_mqtt_netdiag(&d);
+  return (((d.flags & 0x08U) == 0U) && (d.offline_s >= NC_OFFLINE_S)) ? 1 : 0;
+#else
+  return 1;
+#endif
+}
+
+/* A Modbus TCP PDU aimed at 0x3000..0x32FF is answered here (CM7 owns this state; the rest of the
  * map lives on CM4). Returns the reply PDU length, 0 = not ours, pass it on. */
 uint16_t app_peek_mbtcp(const uint8_t *pdu, uint16_t len, uint8_t *rsp, uint16_t cap)
 {
@@ -223,8 +243,14 @@ uint16_t app_peek_mbtcp(const uint8_t *pdu, uint16_t len, uint8_t *rsp, uint16_t
   if (len < 5U) { return 0; }
   fc = pdu[0];
   addr = (uint16_t)(((uint16_t)pdu[1] << 8) | pdu[2]);
-  if ((addr < DIAG_BASE) || (addr > 0x31FFU)) { return 0; }
+  if ((addr < DIAG_BASE) || (addr > 0x32FFU)) { return 0; }
   if ((fc != 0x03U) && (fc != 0x04U) && (fc != 0x06U) && (fc != 0x10U)) { return 0; }
+  if (addr >= 0x3200U)                                       /* network settings block (app_netcfg.c) */
+  {
+    load();
+    if (fc == 0x04U) { return ex(fc, MB_EX_ADDR, rsp); }
+    return app_netcfg_mbtcp(pdu, len, rsp, cap, netcfg_wr_ok());
+  }
   if ((fc != 0x04U) && (addr < WIN_BASE)) { return 0; }      /* holding 0x3000..0x30FF = reserved port-config area on the CM4 map */
   load();
   n = (uint16_t)(((uint16_t)pdu[3] << 8) | pdu[4]);          /* quantity (FC03/04/16) or value (FC06) */

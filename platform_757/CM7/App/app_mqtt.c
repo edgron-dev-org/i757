@@ -168,6 +168,7 @@ static void broker_fail(void)
  * temporary state, resends
  * DISCOVER every 30s until it gets a lease (dhcp_start doesn't clear the current address; once obtained lwip auto-switches to the new address + DHCP-provided DNS). */
 static volatile uint8_t s_ip_fallback = 0;   /* 1 = currently using the static fallback address (DHCP never succeeded) */
+static volatile uint8_t s_ip_static = 0;     /* 1 = static mode applied (`netcfg static`): DHCP stopped, no retries */
 static void mqtt_force_reconnect_cb(void *arg);   /* defined below */
 static void set_static_ip_cb(void *arg)  /* tcpip thread */
 {
@@ -179,7 +180,8 @@ static void set_static_ip_cb(void *arg)  /* tcpip thread */
   ip4addr_aton(app_netcfg_gw(), &s_gw);
   dhcp_stop(&gnetif);
   netif_set_addr(&gnetif, &s_ip, &s_mask, &s_gw);
-  s_ip_fallback = 1;
+  if (app_netcfg_static()) { s_ip_static = 1; s_ip_fallback = 0; }   /* chosen, not stranded: nobody asks DHCP again */
+  else                     { s_ip_static = 0; s_ip_fallback = 1; }
   /* DNS server (for resolving AWS domain / NTP pool; ICS proxy, follows the PC's DNS, region-agnostic) */
   { ip_addr_t dns; if (ipaddr_aton(app_netcfg_dns(), &dns)) { dns_setserver(0, &dns); } }
 }
@@ -1282,6 +1284,20 @@ void mqtt_app_task(void)
     }
 #endif
     TICK_CHECK(7);   /* stage 7 = offline autopsy + heal ladder */
+    /* static mode (`netcfg static`, 2026-11-27): apply once, as soon as the file system can be read */
+    {
+      static uint8_t s_net_boot = 0;
+      if (!s_net_boot && (app_netcfg_ready() || (tick >= 16U)))
+      {
+        s_net_boot = 1;
+        app_netcfg_load();
+        if (app_netcfg_static())
+        {
+          tcpip_callback(set_static_ip_cb, NULL);
+          printf("[CM7] static mode: %s gw=%s (DHCP not used)\n\r", app_netcfg_ip(), app_netcfg_gw());
+        }
+      }
+    }
     /* ~8s without a lease -> fall back to static (addresses in app_cfg.h) */
     if (!ip_shown && (tick == 16U))
     {
@@ -1316,13 +1332,23 @@ void mqtt_app_task(void)
         tcpip_callback(dhcp_retry_cb, NULL);
       }
     }
-    if (app_netcfg_take_dirty() && s_ip_fallback)   /* netcfg set while stranded in fallback: re-apply + reconnect now */
+    if (app_netcfg_take_dirty())
     {
-      printf("[CM7] netcfg changed in fallback -> re-apply\n\r");
-      tcpip_callback(set_static_ip_cb, NULL);
+      if (app_netcfg_static() || (s_ip_fallback && !s_ip_static))   /* static mode chosen, or new addresses while stranded in fallback */
+      {
+        printf("[CM7] netcfg changed -> apply %s %s\n\r", app_netcfg_static() ? "static" : "fallback", app_netcfg_ip());
+        tcpip_callback(set_static_ip_cb, NULL);
 #if APP_ENABLE_CLOUD
-      tcpip_callback(mqtt_force_reconnect_cb, NULL);
+        tcpip_callback(mqtt_force_reconnect_cb, NULL);
 #endif
+      }
+      else if (s_ip_static)   /* static -> DHCP: keep the address until a lease arrives (fallback state does the rest) */
+      {
+        printf("[CM7] netcfg: static -> DHCP\n\r");
+        s_ip_static = 0;
+        s_ip_fallback = 1;
+        tcpip_callback(dhcp_retry_cb, NULL);
+      }
     }
 #if APP_ENABLE_CLOUD
     mqtt_dhcp_bound_check();

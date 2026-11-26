@@ -165,7 +165,7 @@ board describes, the server has no per-board configuration.
 
 ```
 stat        ip / link / cloud / bank / OTA event / time        tasks     both cores: tasks, stack headroom, heap, faults
-netcfg      DHCP-timeout fallback address (persisted)          mbus      backplane scheduler: which module addresses are online
+netcfg      network: DHCP fallback / static mode (persisted)   mbus      backplane scheduler: which module addresses are online
 mbcfg       show/set Modbus ports (mbcfg 485a slave 9600 8N1 addr=1)
 mbr/mbw     read/write a backplane module register             mbpoll    one-shot Modbus master transaction on any port
 pio dump    external address of every process-image point      ota / ota-confirm yes / revert yes
