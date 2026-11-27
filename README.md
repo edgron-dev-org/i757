@@ -1,19 +1,72 @@
-# I757-M Controller SDK
+# I757-M: dual-core STM32H757 controller firmware
 
 <p align="center">
   <img src="docs/img/i757_unit.jpg" width="420" alt="I757-M controller with EX-16DO, EX-16DI and PH_EC expansion modules on a DIN rail">
 </p>
 
-The complete firmware source for the **I757-M**, a DIN-rail modular industrial controller built on
-the dual-core **STM32H757**, together with its manuals, interface specifications and schematics.
-Write your own application on top of the platform, or leave the firmware alone and integrate over
-Modbus or MQTT.
+The complete firmware, manuals and schematics of the **I757-M**, a DIN-rail modular industrial
+controller built on the dual-core **STM32H757**. The Cortex-M7 runs FreeRTOS, LwIP, mbedTLS, MQTT,
+storage and the application; the Cortex-M4 runs the real-time I/O and every Modbus port; OpenAMP
+RPMsg joins them. Write your own application on top of the platform, or leave the firmware alone
+and integrate over Modbus or MQTT.
 
-This is the same code that runs the hardware we sell, and the same code that has been running our
-own hydroponic greenhouse since August 2026. The greenhouse's readings are public:
-[dash.edgron.com/public](https://dash.edgron.com/public).
+This is not a demo project. It is the code in the hardware we sell, and it has run our own
+hydroponic greenhouse unattended since August 2026. The greenhouse's readings are public at
+[dash.edgron.com/public](https://dash.edgron.com/public), and the running log of what broke and
+what was changed is at [edgron.com/field.html](https://edgron.com/field.html).
 
 Hardware, pricing and ordering: [edgron.com](https://edgron.com)
+
+## Worth reading even if you never buy the board
+
+Three faults that only showed up in the field, each fixed in a few lines. The comments at each fix
+give the full account.
+
+- **A dual-core EXTI trap that reset the board 1318 times.** On the H7 dual-core parts the generic
+  `__HAL_GPIO_EXTI_CLEAR_IT()` clears the Cortex-M7's pending register. Called from the Cortex-M4
+  it clears the wrong core's bit, the M4's own bit stays set, and the handler re-enters forever.
+  The M4 has to use the `__HAL_GPIO_EXTID2_*` macros.
+  See [`app_hsdi_cm4.c`](platform_757/CM4/App/app_hsdi_cm4.c), above `exti_edge()`.
+
+- **TCP that would not retransmit for 15 to 45 seconds.** The Ethernet driver template released a
+  transmitted buffer only when its four-descriptor ring was full. Until then the driver still held
+  a reference to the pbuf, and lwIP will not retransmit a segment whose buffer is still
+  referenced. On a quiet MQTT link one lost segment stalled the connection. The fix releases the
+  buffer as soon as the frame has gone out.
+  See `low_level_output()` in [`ethernetif.c`](platform_757/CM7/LWIP/Target/ethernetif.c).
+
+- **A UART that went deaf for good after one refused restart.** The recovery routine cleared its
+  "receiver is dead" flag before checking that the HAL had accepted the re-arm. One refusal, and
+  the port never listened again while transmit carried on as normal. It now clears the flag only
+  after a re-arm that was accepted, and escalates from re-arm to abort to full re-initialisation
+  if refusals continue.
+  See `uart_heal()` in [`uart_drv.c`](uartdrv/uart_drv.c) (Apache-2.0, no hardware tie).
+
+Also worth a look: the over-the-air update with a trial period and automatic rollback
+([`app_ota.c`](platform_757/CM7/App/app_ota.c), design in
+[`docs/OTA_Update_and_Brick_Proofing.md`](docs/OTA_Update_and_Brick_Proofing.md)).
+
+## What the firmware does
+
+- **Cyclic I/O scanning into a process image.** The M4 core polls every Modbus port and the
+  backplane from one scan table; your code reads and writes named points without blocking.
+- **Your application as ordinary FreeRTOS tasks**, in one file (`platform_757/CM7/App/app_user.c`),
+  against one header (`app_platform.h`).
+- **Over-the-air updates that cannot brick the board.** Signed images, A/B flash banks, a trial
+  period and automatic rollback if the new image does not confirm itself. Module firmware is
+  updated over the backplane.
+- **Cloud link over MQTT with mutual TLS.** The board publishes a description of its own points, so
+  a dashboard needs no per-device code. Leave it out with one switch (`APP_ENABLE_CLOUD 0`) for a
+  standalone controller.
+- **On-board data logging**: daily CSV files on microSD or the on-board flash, plus an event
+  journal, both retrievable over the cloud link.
+- **Standard protocols throughout**: Modbus RTU and TCP, MQTT, RPMsg between the cores. Third-party
+  tools can talk to every bus, including the backplane.
+
+As shipped, `app_user.c` is not a blank template. It is the greenhouse application: nutrient and pH
+dosing for two reservoirs, roof-vent and fan control, a feed-flow alarm, and a scan table of
+third-party RS-485 sensors. Read it as a worked example, then replace it with your own
+(`CLAUDE.md` lists what to delete).
 
 ## The hardware
 
@@ -43,28 +96,6 @@ Expansion modules, each of which also works on its own as a plain Modbus RTU sla
 | EX-BUS | Passive power and RS-485 entry board for a module row | [manual](docs/EX_BUS_Module_Manual.md) |
 
 Schematics of the controller's two boards and the EX-16DO are in [`hardware/`](hardware/).
-
-## What the firmware does
-
-- **Cyclic I/O scanning into a process image.** The M4 core polls every Modbus port and the
-  backplane from one scan table; your code reads and writes named points without blocking.
-- **Your application as ordinary FreeRTOS tasks**, in one file (`platform_757/CM7/App/app_user.c`),
-  against one header (`app_platform.h`).
-- **Over-the-air updates that cannot brick the board.** Signed images, A/B flash banks, a trial
-  period and automatic rollback if the new image does not confirm itself. Module firmware is
-  updated over the backplane.
-- **Cloud link over MQTT with mutual TLS.** The board publishes a description of its own points, so
-  a dashboard needs no per-device code. Leave it out with one switch (`APP_ENABLE_CLOUD 0`) for a
-  standalone controller.
-- **On-board data logging**: daily CSV files on microSD or the on-board flash, plus an event
-  journal, both retrievable over the cloud link.
-- **Standard protocols throughout**: Modbus RTU and TCP, MQTT, RPMsg between the cores. Third-party
-  tools can talk to every bus, including the backplane.
-
-As shipped, `app_user.c` is not a blank template. It is the greenhouse application: nutrient and pH
-dosing for two reservoirs, roof-vent and fan control, a feed-flow alarm, and a scan table of
-third-party RS-485 sensors. Read it as a worked example, then replace it with your own
-(`CLAUDE.md` lists what to delete).
 
 ## What's here
 
