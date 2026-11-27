@@ -1,5 +1,10 @@
 # I757-M: dual-core STM32H757 controller firmware
 
+**Right now this firmware is controlling the water and nutrients of a working hydroponic
+greenhouse.** One I757-M doses fertiliser and pH into two reservoirs, runs the irrigation, and opens
+the roof vents and fan. It has been in charge there since August 2026, and its readings are public,
+live: [dash.edgron.com/public](https://dash.edgron.com/public).
+
 <p align="center">
   <img src="docs/img/i757_unit.jpg" width="420" alt="I757-M controller with EX-16DO, EX-16DI and PH_EC expansion modules on a DIN rail">
 </p>
@@ -10,10 +15,9 @@ storage and the application; the Cortex-M4 runs the real-time I/O and every Modb
 RPMsg joins them. Write your own application on top of the platform, or leave the firmware alone
 and integrate over Modbus or MQTT.
 
-This is not a demo project. It is the code in the hardware we sell, and it has run our own
-hydroponic greenhouse unattended since August 2026. The greenhouse's readings are public at
-[dash.edgron.com/public](https://dash.edgron.com/public), and the running log of what broke and
-what was changed is at [edgron.com/field.html](https://edgron.com/field.html).
+This is not a demo project: it is the same code that ships in the hardware we sell. The running
+log of what broke in the greenhouse and what was changed is at
+[edgron.com/field.html](https://edgron.com/field.html).
 
 Hardware, pricing and ordering: [edgron.com](https://edgron.com)
 
