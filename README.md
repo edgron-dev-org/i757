@@ -21,6 +21,17 @@ log of what broke in the greenhouse and what was changed is at
 
 Hardware, pricing and ordering: [edgron.com](https://edgron.com)
 
+## What it is running in the greenhouse
+
+<p align="center">
+  <a href="docs/img/greenhouse_control.svg"><img src="docs/img/greenhouse_control.svg" alt="Block diagram: one I757-M with EX-16DO, EX-16DI and two PH_EC modules running a greenhouse. Step 1, climate and an NFT system; step 2, a coco drip line added on the same controller"></a>
+</p>
+
+One controller, built up in two steps. In August it took over the climate and an NFT system. In
+October a coco drip line was added on the same controller: one more module on the backplane, five
+third-party sensors on a spare RS-485 port, and a second instance of the same dosing code. The
+application that does all of this is the `app_user.c` in this repository.
+
 ## Worth reading even if you never buy the board
 
 Three faults that only showed up in the field, each fixed in a few lines. The comments at each fix

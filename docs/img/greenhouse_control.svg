@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 930" width="1400" height="930" font-family="system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<style>
+ .bg{fill:#0e1624}
+ .lane{fill:#182438;stroke:#243450}
+ .ctl{fill:#131d2e;stroke:#dce6f5;stroke-width:2}
+ .m1{fill:#10233a;stroke:#3fa9f5;stroke-width:2}
+ .m2{fill:#0f2c22;stroke:#39d98a;stroke-width:2}
+ .free{fill:none;stroke:#8fa3c0;stroke-width:2;stroke-dasharray:8 6}
+ .f1{fill:#131d2e;stroke:#3fa9f5;stroke-width:1.4}
+ .f2{fill:#10241c;stroke:#39d98a;stroke-width:1.4}
+ .port{fill:#243450;stroke:#8fa3c0}
+ .w1{stroke:#3fa9f5;stroke-width:2;fill:none}
+ .w2{stroke:#39d98a;stroke-width:2;fill:none}
+ .bus{stroke:#dce6f5;stroke-width:5;fill:none}
+ .T{fill:#ffffff;font-size:30px;font-weight:700}
+ .h{fill:#dce6f5;font-size:19px;font-weight:700}
+ .t{fill:#dce6f5;font-size:16px}
+ .s{fill:#8fa3c0;font-size:14.5px}
+ .b{fill:#3fa9f5;font-size:16px;font-weight:700}
+ .g{fill:#39d98a;font-size:16px;font-weight:700}
+ .gs{fill:#39d98a;font-size:14.5px}
+</style>
+<rect class="bg" width="1400" height="930"/>
+
+<!-- title + legend -->
+<text class="T" x="30" y="46">One controller, one greenhouse, built in two steps</text>
+<rect x="870" y="22" width="22" height="22" rx="4" fill="#3fa9f5"/>
+<text class="t" x="900" y="40">Step 1, Aug: climate + NFT</text>
+<rect x="1130" y="22" width="22" height="22" rx="4" fill="#39d98a"/>
+<text class="t" x="1160" y="40">Step 2, Oct: coco drip line</text>
+
+<g transform="translate(0,30)">
+<!-- CONTROLLER -->
+<rect class="ctl" x="30" y="84" width="310" height="262" rx="10"/>
+<text class="h" x="46" y="112">I757-M controller</text>
+<text class="s" x="46" y="132">dual-core STM32H757, FreeRTOS</text>
+<text class="s" x="46" y="150">all control loops run on the board</text>
+<rect class="port" x="46" y="166" width="278" height="36" rx="5"/>
+<text class="t" x="56" y="190">Ethernet</text><text class="s" x="140" y="190">MQTT over TLS, OTA</text>
+<rect class="port" x="46" y="208" width="278" height="36" rx="5"/>
+<text class="t" x="56" y="232">RS-485 ×6</text><text class="s" x="150" y="232">Modbus master or slave</text>
+<rect class="port" x="46" y="250" width="278" height="36" rx="5"/>
+<text class="t" x="56" y="274">8 fast inputs</text><text class="s" x="166" y="274">pulse count, encoder</text>
+<rect class="port" x="46" y="292" width="278" height="36" rx="5"/>
+<text class="t" x="56" y="316">Backplane bus</text><text class="s" x="170" y="316">up to 16 modules</text>
+
+<!-- BACKPLANE BUS -->
+<path class="bus" d="M340 310 H360 V64 H1286"/>
+<text class="s" x="372" y="56">backplane: RS-485 Modbus RTU. Every module has its own MCU and address, plug in and add a row to the scan table.</text>
+<path class="bus" d="M475 64 V84 M677 64 V84 M879 64 V84"/>
+<path d="M1081 64 V84" stroke="#39d98a" stroke-width="5"/>
+<path d="M1286 64 V84" stroke="#8fa3c0" stroke-width="3" stroke-dasharray="6 5"/>
+
+<!-- MODULES -->
+<rect class="m1" x="380" y="84" width="190" height="92" rx="8"/>
+<text class="h" x="394" y="112">EX-16DO</text>
+<text class="s" x="394" y="134">16 isolated outputs, 1 A</text>
+<text class="b" x="394" y="160">9 used</text><text class="g" x="462" y="160">+5</text><text class="s" x="494" y="160">2 spare</text>
+
+<rect class="m1" x="582" y="84" width="190" height="92" rx="8"/>
+<text class="h" x="596" y="112">EX-16DI</text>
+<text class="s" x="596" y="134">16 isolated inputs, 24 V</text>
+<text class="g" x="596" y="160">+2</text><text class="s" x="628" y="160">14 spare</text>
+
+<rect class="m1" x="784" y="84" width="190" height="92" rx="8"/>
+<text class="h" x="798" y="112">PH_EC</text>
+<text class="s" x="798" y="134">2 pH, 2 EC, 4 temp</text>
+<text class="b" x="798" y="160">all used</text>
+
+<rect class="m2" x="986" y="84" width="190" height="92" rx="8"/>
+<text class="h" x="1000" y="112">PH_EC</text>
+<text class="gs" x="1000" y="134">second one, plugged in</text>
+<text class="g" x="1000" y="160">added in step 2</text>
+
+<rect class="free" x="1188" y="84" width="190" height="92" rx="8"/>
+<text class="h" x="1202" y="112">free slots</text>
+<text class="s" x="1202" y="134">8 analog inputs,</text>
+<text class="s" x="1202" y="152">more outputs or inputs</text>
+
+<!-- FIELD: relay outputs -->
+<path class="w1" d="M440 176 V214"/><path class="w2" d="M520 176 V396"/>
+<rect class="f1" x="380" y="214" width="120" height="170" rx="6"/>
+<text class="b" x="390" y="238">Step 1</text>
+<text class="t" x="390" y="262">4 dosing</text><text class="t" x="390" y="281">pumps:</text>
+<text class="s" x="390" y="300">A, B, acid,</text><text class="s" x="390" y="318">base</text>
+<text class="t" x="390" y="342">roof vent,</text><text class="t" x="390" y="361">3 stages</text>
+<rect class="f1" x="380" y="396" width="120" height="74" rx="6"/>
+<text class="t" x="390" y="422">wall fan</text>
+<text class="t" x="390" y="446">air pump</text>
+<path class="w1" d="M440 384 V396"/>
+<rect class="f2" x="380" y="482" width="190" height="118" rx="6"/>
+<path class="w2" d="M520 396 V482"/>
+<text class="g" x="390" y="506">Step 2: +5 outputs</text>
+<text class="t" x="390" y="530">3 dosing pumps</text>
+<text class="t" x="390" y="552">stir pump</text>
+<text class="t" x="390" y="574">drip irrigation pump</text>
+
+<!-- FIELD: digital inputs -->
+<path class="w2" d="M677 176 V482"/>
+<rect class="f2" x="582" y="482" width="190" height="118" rx="6"/>
+<text class="g" x="592" y="506">Step 2: +2 inputs</text>
+<text class="t" x="592" y="530">feed tank low float</text>
+<text class="t" x="592" y="552">overflow float</text>
+
+<!-- FIELD: pH/EC 1 -->
+<path class="w1" d="M879 176 V214"/>
+<rect class="f1" x="784" y="214" width="190" height="170" rx="6"/>
+<text class="b" x="794" y="238">Step 1</text>
+<text class="t" x="794" y="262">NFT reservoir</text>
+<text class="s" x="794" y="282">2 pH probes, 2 EC probes</text>
+<text class="s" x="794" y="300">(they check each other)</text>
+<text class="s" x="794" y="318">water temperature ×2</text>
+<text class="t" x="794" y="344">Air temperature</text>
+<text class="s" x="794" y="364">tunnel and outdoor</text>
+
+<!-- FIELD: pH/EC 2 -->
+<path class="w2" d="M1081 176 V482"/>
+<rect class="f2" x="986" y="482" width="190" height="118" rx="6"/>
+<text class="g" x="996" y="506">Step 2</text>
+<text class="t" x="996" y="530">coco feed tank</text>
+<text class="s" x="996" y="550">pH, EC, temperature</text>
+<text class="t" x="996" y="574">runoff EC</text>
+
+<!-- FIELD: free -->
+<text class="s" x="1196" y="238">Step 3 has room:</text>
+<text class="s" x="1196" y="258">2 outputs, 14 inputs,</text>
+<text class="s" x="1196" y="278">5 RS-485 ports,</text>
+<text class="s" x="1196" y="298">2 fast inputs,</text>
+<text class="s" x="1196" y="318">12 module addresses</text>
+
+<!-- FIELD: controller ports -->
+<path class="w1" d="M70 346 V378"/>
+<rect class="f1" x="30" y="378" width="262" height="92" rx="6"/>
+<text class="b" x="40" y="401">Step 1</text>
+<text class="t" x="40" y="422">dashboard, phone alarms, OTA</text>
+<text class="t" x="40" y="442">4 channel flow meters,</text>
+<text class="t" x="40" y="461">top-up water meter</text>
+<path class="w2" d="M316 346 V482"/>
+<rect class="f2" x="30" y="482" width="310" height="118" rx="6"/>
+<text class="g" x="40" y="506">Step 2: +1 RS-485 port, +1 fast input</text>
+<text class="t" x="40" y="530">5 third-party Modbus sensors:</text>
+<text class="s" x="40" y="550">air T/RH, 4 substrate moisture probes</text>
+<text class="t" x="40" y="574">feed tank inlet water meter</text>
+
+<!-- what each step runs -->
+<rect class="lane" x="30" y="622" width="662" height="120" rx="10"/>
+<rect x="30" y="622" width="8" height="120" rx="4" fill="#3fa9f5"/>
+<text class="b" x="52" y="650">STEP 1, August: climate + NFT</text>
+<text class="t" x="52" y="676">Roof vent and fan by air temperature, night cooling by water temperature.</text>
+<text class="t" x="52" y="700">NFT: 4 channels of leafy greens. EC and pH held by a self-learning dosing loop,</text>
+<text class="t" x="52" y="724">blocked channel alarm from the flow meters, 24 h cap per pump.</text>
+
+<rect class="lane" x="708" y="622" width="662" height="120" rx="10"/>
+<rect x="708" y="622" width="8" height="120" rx="4" fill="#39d98a"/>
+<text class="g" x="730" y="650">STEP 2, October: coco drip-to-waste, same controller</text>
+<text class="t" x="730" y="676">Cucumbers and aubergines. Own 20 L feed tank with its own EC and pH loop,</text>
+<text class="t" x="730" y="700">timed drip irrigation, runoff EC, substrate moisture and temperature.</text>
+<text class="t" x="730" y="724">Runs as a second instance of the same dosing code.</text>
+
+<!-- bottom line -->
+<rect class="lane" x="30" y="760" width="1340" height="112" rx="10"/>
+<text class="h" x="52" y="792">What step 2 cost in hardware</text>
+<text class="t" x="52" y="820">1 module plugged into the backplane. 5 sensors daisy-chained on a spare RS-485 port. 8 spare terminals wired</text>
+<text class="t" x="52" y="844">(5 outputs, 2 inputs, 1 pulse input). The controller hardware was not touched.</text>
+</g>
+</svg>
